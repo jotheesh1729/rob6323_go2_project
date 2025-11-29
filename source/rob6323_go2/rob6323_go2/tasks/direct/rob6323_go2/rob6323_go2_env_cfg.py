@@ -8,6 +8,7 @@ from isaaclab_assets.robots.unitree import UNITREE_GO2_CFG
 import isaaclab.envs.mdp as mdp
 import isaaclab.sim as sim_utils
 from isaaclab.assets import ArticulationCfg
+from isaaclab.actuators import ImplicitActuatorCfg
 from isaaclab.envs import DirectRLEnvCfg
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sim import SimulationCfg
