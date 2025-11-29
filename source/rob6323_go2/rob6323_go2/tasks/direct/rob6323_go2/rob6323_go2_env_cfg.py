@@ -29,6 +29,11 @@ class Rob6323Go2EnvCfg(DirectRLEnvCfg):
     state_space = 0
     debug_vis = True
 
+    # PD control gains -- part 2
+    Kp = 20.0  # Proportional gain
+    Kd = 0.5   # Derivative gain
+    torque_limits = 100.0  # Max torque
+
     # simulation
     sim: SimulationCfg = SimulationCfg(
         dt=1 / 200,
@@ -56,6 +61,15 @@ class Rob6323Go2EnvCfg(DirectRLEnvCfg):
     )
     # robot(s)
     robot_cfg: ArticulationCfg = UNITREE_GO2_CFG.replace(prim_path="/World/envs/env_.*/Robot")
+
+    # "base_legs" is an arbitrary key we use to group these actuators -- part 2
+    robot_cfg.actuators["base_legs"] = ImplicitActuatorCfg(
+        joint_names_expr=[".*_hip_joint", ".*_thigh_joint", ".*_calf_joint"],
+        effort_limit=23.5,
+        velocity_limit=30.0,
+        stiffness=0.0,  # CRITICAL: Set to 0 to disable implicit P-gain
+        damping=0.0,    # CRITICAL: Set to 0 to disable implicit D-gain
+    )
 
     # scene
     scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=4096, env_spacing=4.0, replicate_physics=True)
