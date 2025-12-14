@@ -29,6 +29,8 @@ class Rob6323Go2EnvCfg(DirectRLEnvCfg):
     observation_space = 48
     state_space = 0
     debug_vis = True
+    # part -- 3
+    base_height_min = 0.20
 
     # PD control gains -- part 2
     Kp = 20.0  # Proportional gain
@@ -94,4 +96,5 @@ class Rob6323Go2EnvCfg(DirectRLEnvCfg):
     # reward scales
     lin_vel_reward_scale = 1.0
     yaw_rate_reward_scale = 0.5
+    #part-1 change
     action_rate_reward_scale = -0.1
