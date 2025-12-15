@@ -84,6 +84,7 @@ class Rob6323Go2Env(DirectRLEnv):
     def _setup_scene(self):
         self.robot = Articulation(self.cfg.robot_cfg)
         self._contact_sensor = ContactSensor(self.cfg.contact_sensor)
+        self.scene.sensors["contact_sensor"] = self._contact_sensor
         # add ground plane
         self.cfg.terrain.num_envs = self.scene.cfg.num_envs
         self.cfg.terrain.env_spacing = self.scene.cfg.env_spacing

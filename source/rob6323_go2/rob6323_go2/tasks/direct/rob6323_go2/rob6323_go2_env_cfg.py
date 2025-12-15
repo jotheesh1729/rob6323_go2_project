@@ -31,7 +31,7 @@ class Rob6323Go2EnvCfg(DirectRLEnvCfg):
     state_space = 0
     debug_vis = True
     # part -- 3
-    base_height_min = 0.20
+    base_height_min = 0.05 #correction to change to 5cm after suggestion
 
     # PD control gains -- part 2
     Kp = 20.0  # Proportional gain
