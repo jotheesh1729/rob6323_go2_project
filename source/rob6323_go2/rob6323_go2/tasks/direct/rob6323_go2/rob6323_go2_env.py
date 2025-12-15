@@ -179,7 +179,7 @@ class Rob6323Go2Env(DirectRLEnv):
         #for tilt fault from gravity norm on xy
         rew_orient = torch.norm(self.robot.data.projected_gravity_b[:, :2],dim=-1)
         #z-velocity penalty
-        rew_lin_vel_z = torch.square(self.robot.data.root_lin_vel_b[:, 2],dim=-1)
+        rew_lin_vel_z = torch.square(self.robot.data.root_lin_vel_b[:, 2])
         #joint_vel penalty
         rew_dof_vel = torch.norm(self.robot.data.joint_vel,dim=-1)
         #roll/pitch penalty
