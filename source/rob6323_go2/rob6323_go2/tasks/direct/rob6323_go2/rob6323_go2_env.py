@@ -63,7 +63,11 @@ class Rob6323Go2Env(DirectRLEnv):
                 "track_lin_vel_xy_exp",
                 "track_ang_vel_z_exp",
                 "rew_action_rate", # -- part 1
-                "raibert_heuristic" # -- part 1
+                "raibert_heuristic", # -- part 1
+                "orient", # -- part 5
+                "lin_vel_z", # -- part 5
+                "dof_vel", # -- part 5
+                "ang_vel_xy" # -- part 5
             ]
         }
         # Get specific body indices
@@ -173,13 +177,13 @@ class Rob6323Go2Env(DirectRLEnv):
 
         #part 5 --> adding reward penalty terms
         #for tilt fault from gravity norm on xy
-        rew_orient = torch.norm(self.robot.data.projected_gravity_b[:, :2])
+        rew_orient = torch.norm(self.robot.data.projected_gravity_b[:, :2],dim=-1)
         #z-velocity penalty
-        rew_lin_vel_z = torch.square(self.robot.data.root_lin_vel_b[:, 2])
+        rew_lin_vel_z = torch.square(self.robot.data.root_lin_vel_b[:, 2],dim=-1)
         #joint_vel penalty
-        rew_dof_vel = torch.norm(self.robot.data.joint_vel)
+        rew_dof_vel = torch.norm(self.robot.data.joint_vel,dim=-1)
         #roll/pitch penalty
-        rew_ang_vel_xy = torch.norm(self.robot.data.root_ang_vel_b[:, :2])
+        rew_ang_vel_xy = torch.norm(self.robot.data.root_ang_vel_b[:, :2],dim=-1)
 
         # part-1
         rewards = {
