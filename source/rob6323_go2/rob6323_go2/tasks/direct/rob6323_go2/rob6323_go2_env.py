@@ -196,12 +196,11 @@ class Rob6323Go2Env(DirectRLEnv):
         rew_foot_clearance = torch.square(target_height - foot_height) * (1 - self.desired_contact_states)
         rew_feet_clearance = torch.sum(rew_foot_clearance, dim=1)
 
-        foot_forces = torch.norm(self._contact_sensor.data.net_forces_w_history[:, self._feet_ids_sensor, :], dim=-1)
+        foot_forces = torch.norm(self._contact_sensor.data.net_forces_w[:, self._feet_ids_sensor, :], dim=-1)
         desired_contact = self.desired_contact_states
         rew_tracking_contacts_shaped_force = torch.zeros(self.num_envs, device=self.device)
         for i in range(4):
-            rew_tracking_contacts_shaped_force += - (1 - desired_contact[:, i]) * (
-                        1 - torch.exp(-1 * foot_forces[:, i] ** 2 / 100.))
+            rew_tracking_contacts_shaped_force += - (1 - desired_contact[:, i]) * (1 - torch.exp(-1 * foot_forces[:, i] ** 2 / 100.))
         rew_tracking_contacts_shaped_force /= 4  # over 4 feet of the robot
 
         # part-1
