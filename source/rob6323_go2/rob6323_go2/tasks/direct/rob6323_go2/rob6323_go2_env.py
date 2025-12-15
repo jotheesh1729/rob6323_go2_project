@@ -38,10 +38,13 @@ class Rob6323Go2Env(DirectRLEnv):
         self.last_actions = torch.zeros(self.num_envs, gym.spaces.flatdim(self.single_action_space), 3, dtype=torch.float, device=self.device, requires_grad=False)
         # foot placement vars for --> part 4
         self._feet_ids = []
+        self._feet_ids_sensor = [] # contact sensor id --> part 6
         foot_names = ["FL_foot", "FR_foot", "RL_foot", "RR_foot"]
         for name in foot_names:
             id_list, _ = self.robot.find_bodies(name)
             self._feet_ids.append(id_list[0])
+            sensor_id_list, _ = self._contact_sensor.find_bodies(name)
+            self._feet_ids_sensor.append(sensor_id_list[0])
         # PD control parameters -- part 2
         self.Kp = torch.tensor([cfg.Kp] * 12, device=self.device).unsqueeze(0).repeat(self.num_envs, 1)
         self.Kd = torch.tensor([cfg.Kd] * 12, device=self.device).unsqueeze(0).repeat(self.num_envs, 1)
@@ -185,6 +188,21 @@ class Rob6323Go2Env(DirectRLEnv):
         #roll/pitch penalty
         rew_ang_vel_xy = torch.norm(self.robot.data.root_ang_vel_b[:, :2],dim=-1)
 
+        #part 6 --> adding reward function from go2_terrain from isaac gym
+        phases = 1 - torch.abs(1.0 - torch.clip((self.foot_indices * 2.0) - 1.0, 0.0, 1.0) * 2.0)
+        foot_height = self.foot_positions_w[:, :, 2] # - reference_heights
+        target_height = 0.08 * phases + 0.02 # offset for foot radius 2cm with 8cm clearance
+        rew_foot_clearance = torch.square(target_height - foot_height) * (1 - self.desired_contact_states)
+        rew_feet_clearance = torch.sum(rew_foot_clearance, dim=1)
+
+        foot_forces = torch.norm(self._contact_sensor.data.net_forces_w_history[:, self._feet_ids_sensor, :], dim=-1)
+        desired_contact = self.desired_contact_states
+        rew_tracking_contacts_shaped_force = torch.zeros(self.num_envs, device=self.device)
+        for i in range(4):
+            rew_tracking_contacts_shaped_force += - (1 - desired_contact[:, i]) * (
+                        1 - torch.exp(-1 * foot_forces[:, i] ** 2 / 100.))
+        rew_tracking_contacts_shaped_force /= 4  # over 4 feet of the robot
+
         # part-1
         rewards = {
             "track_lin_vel_xy_exp": lin_vel_error_mapped * self.cfg.lin_vel_reward_scale ,
@@ -195,6 +213,8 @@ class Rob6323Go2Env(DirectRLEnv):
             "lin_vel_z": rew_lin_vel_z * self.cfg.lin_vel_z_reward_scale, # --> part 5
             "dof_vel": rew_dof_vel * self.cfg.dof_vel_reward_scale, # --> part 5
             "ang_vel_xy": rew_ang_vel_xy * self.cfg.ang_vel_xy_reward_scale, # --> part 5
+            "feet_clearance": rew_feet_clearance * self.cfg.feet_clearance_reward_scale,
+            "tracking_contacts_shaped_force": rew_tracking_contacts_shaped_force * self.cfg.tracking_contacts_shaped_force_reward_scale,
         }
         reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
         # Logging
