@@ -171,12 +171,26 @@ class Rob6323Go2Env(DirectRLEnv):
         self.last_actions = torch.roll(self.last_actions, 1, 2)
         self.last_actions[:, :, 0] = self._actions[:]
 
+        #part 5 --> adding reward penalty terms
+        #for tilt fault from gravity norm on xy
+        rew_orient = torch.norm(self.robot.data.projected_gravity_b[:, :2])
+        #z-velocity penalty
+        rew_lin_vel_z = torch.square(self.robot.data.root_lin_vel_b[:, 2])
+        #joint_vel penalty
+        rew_dof_vel = torch.norm(self.robot.data.joint_vel)
+        #roll/pitch penalty
+        rew_ang_vel_xy = torch.norm(self.robot.data.root_ang_vel_b[:, :2])
+
         # part-1
         rewards = {
             "track_lin_vel_xy_exp": lin_vel_error_mapped * self.cfg.lin_vel_reward_scale ,
             "track_ang_vel_z_exp": yaw_rate_error_mapped * self.cfg.yaw_rate_reward_scale ,
             "rew_action_rate": rew_action_rate * self.cfg.action_rate_reward_scale ,          # -- part 1
             "raibert_heuristic": rew_raibert_heuristic * self.cfg.raibert_heuristic_reward_scale, # --> part 4
+            "orient": rew_orient * self.cfg.orient_reward_scale, # --> part 5
+            "lin_vel_z": rew_lin_vel_z * self.cfg.lin_vel_z_reward_scale, # --> part 5
+            "dof_vel": rew_dof_vel * self.cfg.dof_vel_reward_scale, # --> part 5
+            "ang_vel_xy": rew_ang_vel_xy * self.cfg.ang_vel_xy_reward_scale, # --> part 5
         }
         reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
         # Logging
