@@ -70,7 +70,9 @@ class Rob6323Go2Env(DirectRLEnv):
                 "orient", # -- part 5
                 "lin_vel_z", # -- part 5
                 "dof_vel", # -- part 5
-                "ang_vel_xy" # -- part 5
+                "ang_vel_xy", # -- part 5
+                "feet_clearance", # -- part 6
+                "tracking_contacts_shaped_force" # -- part 6
             ]
         }
         # Get specific body indices
