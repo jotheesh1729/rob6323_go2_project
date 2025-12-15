@@ -29,10 +29,13 @@ class Rob6323Go2EnvCfg(DirectRLEnvCfg):
     observation_space = 48
     state_space = 0
     debug_vis = True
+    
     # PD control gains
     Kp = 20.0  # Proportional gain
     Kd = 0.5   # Derivative gain
     torque_limits = 100.0  # Max torque
+    
+    base_height_min = 0.20  # Terminate if base is lower than 20cm
 
     # simulation
     sim: SimulationCfg = SimulationCfg(
