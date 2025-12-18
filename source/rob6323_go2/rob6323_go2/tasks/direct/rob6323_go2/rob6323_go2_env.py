@@ -83,6 +83,7 @@ class Rob6323Go2Env(DirectRLEnv):
                 "ang_vel_xy",          # Part 5
                 "feet_clearance",      # Part 6
                 "tracking_contacts_shaped_force"  # Part 6
+                "friction_loss" 
             ]
         }
         # variables needed for action rate penalization
@@ -132,10 +133,10 @@ class Rob6323Go2Env(DirectRLEnv):
         joint_vel = self.robot.data.joint_vel
         tau_stiction = self.friction_Fs * torch.tanh(joint_vel / 0.1)
         tau_viscous = self.friction_mu * joint_vel
-        tau_friction = tau_stiction + tau_viscous
+        self.tau_friction = tau_stiction + tau_viscous
         
         #apply friction to PD out
-        torques = torques_pd - tau_friction
+        torques = torques_pd - self.tau_friction
         
         #clip to torque lim
         torques = torch.clip(torques, -self.torque_limits, self.torque_limits)
@@ -205,7 +206,7 @@ class Rob6323Go2Env(DirectRLEnv):
         # Update the prev action hist (roll buffer and insert new action)
         self.last_actions = torch.roll(self.last_actions, 1, 2)
         self.last_actions[:, :, 0] = self._actions[:]
-
+        friction_loss = torch.sum(torch.abs(self.tau_friction * self.robot.data.joint_vel), dim=1)
         # Add to rewards dict
         rewards = {
             "track_lin_vel_xy_exp": lin_vel_error_mapped * self.cfg.lin_vel_reward_scale, # Removed step_dt
@@ -221,6 +222,7 @@ class Rob6323Go2Env(DirectRLEnv):
             "ang_vel_xy": rew_ang_vel_xy * self.cfg.ang_vel_xy_reward_scale,
             "feet_clearance": rew_feet_clearance * self.cfg.feet_clearance_reward_scale,
             "tracking_contacts_shaped_force": rew_tracking_contacts * self.cfg.tracking_contacts_shaped_force_reward_scale,
+            "friction_loss": friction_loss * -0.0001,
         }
         
         
