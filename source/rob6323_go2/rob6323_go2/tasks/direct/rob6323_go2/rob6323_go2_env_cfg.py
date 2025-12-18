@@ -36,7 +36,13 @@ class Rob6323Go2EnvCfg(DirectRLEnvCfg):
     torque_limits = 100.0  # Max torque
     
     # In Rob6323Go2EnvCfg
-    base_height_min = 0.20  # Terminate if base is lower than 20cm
+    base_height_min = 0.05  # Terminate if base is lower than 20cm
+    
+    # Part 5 - Additional reward scales
+    orient_reward_scale = -5.0
+    lin_vel_z_reward_scale = -0.02
+    dof_vel_reward_scale = -0.0001
+    ang_vel_xy_reward_scale = -0.001
     
     observation_space = 48 + 4  # Added 4 for clock inputs
 
