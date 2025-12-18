@@ -83,7 +83,8 @@ class Rob6323Go2Env(DirectRLEnv):
                 "ang_vel_xy",          # Part 5
                 "feet_clearance",      # Part 6
                 "tracking_contacts_shaped_force", # Part 6
-                "friction_loss" 
+                "friction_loss", 
+                'torque'  #tp
             ]
         }
         # variables needed for action rate penalization
