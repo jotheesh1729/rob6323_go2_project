@@ -52,6 +52,7 @@ class Rob6323Go2Env(DirectRLEnv):
         self.Kd = torch.tensor([cfg.Kd] * 12, device=self.device).unsqueeze(0).repeat(self.num_envs, 1)
         self.motor_offsets = torch.zeros(self.num_envs, 12, device=self.device)
         self.torque_limits = cfg.torque_limits
+        self.torques = torch.zeros(self.num_envs, 12, device=self.device)
 
         # actuator friction coeff init
         self.stiction_coeff = torch.zeros(self.num_envs, 12, device=self.device)
@@ -78,7 +79,8 @@ class Rob6323Go2Env(DirectRLEnv):
                 "dof_vel", # -- part 5
                 "ang_vel_xy", # -- part 5
                 "feet_clearance", # -- part 6
-                "tracking_contacts_shaped_force" # -- part 6
+                "tracking_contacts_shaped_force", # -- part 6
+                "torques" # --> torque penalty
             ]
         }
         # Get specific body indices
@@ -126,7 +128,7 @@ class Rob6323Go2Env(DirectRLEnv):
         actuator_friction_torque = stiction + viscous
 
         # Compute PD torques -- part 2
-        torques = torch.clip(
+        self.torques = torch.clip(
             (
                 self.Kp * (
                     self.desired_joint_pos 
@@ -141,7 +143,7 @@ class Rob6323Go2Env(DirectRLEnv):
 
 
         # Apply torques to the robot -- part 2
-        self.robot.set_joint_effort_target(torques)
+        self.robot.set_joint_effort_target(self.torques)
 
     def _get_observations(self) -> dict:
         self._previous_actions = self._actions.clone()
@@ -204,6 +206,8 @@ class Rob6323Go2Env(DirectRLEnv):
         rew_dof_vel = torch.norm(self.robot.data.joint_vel,dim=-1)
         #roll/pitch penalty
         rew_ang_vel_xy = torch.norm(self.robot.data.root_ang_vel_b[:, :2],dim=-1)
+        #joint torques 
+        rew_torques = torch.norm(self.torques, dim=-1)
 
         #part 6 --> adding reward function from go2_terrain from isaac gym for foot clearance
         phases = 1 - torch.abs(1.0 - torch.clip((self.foot_indices * 2.0) - 1.0, 0.0, 1.0) * 2.0)
@@ -230,6 +234,7 @@ class Rob6323Go2Env(DirectRLEnv):
             "dof_vel": rew_dof_vel * self.cfg.dof_vel_reward_scale, # --> part 5
             "ang_vel_xy": rew_ang_vel_xy * self.cfg.ang_vel_xy_reward_scale, # --> part 5
             "feet_clearance": rew_feet_clearance * self.cfg.feet_clearance_reward_scale,
+            "torques": rew_torques * self.cfg.torque_reward_scale, # --> torque penalty very small
             "tracking_contacts_shaped_force": rew_tracking_contacts_shaped_force * self.cfg.tracking_contacts_shaped_force_reward_scale,
         }
         reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
@@ -265,6 +270,7 @@ class Rob6323Go2Env(DirectRLEnv):
         self._actions[env_ids] = 0.0
         self._previous_actions[env_ids] = 0.0
         self.last_actions[env_ids] = 0.0   # -- part 1
+        self.torques[env_ids] = 0.0
 
         # Sample new commands
         self._commands[env_ids] = torch.zeros_like(self._commands[env_ids]).uniform_(-1.0, 1.0)
