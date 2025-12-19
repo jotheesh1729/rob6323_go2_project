@@ -47,7 +47,7 @@ class Rob6323Go2EnvCfg(DirectRLEnvCfg):
     
     # reward scales
     lin_vel_reward_scale = 2.0 #2,4,6
-    yaw_rate_reward_scale = 0.1 #.1,3,1.5
+    yaw_rate_reward_scale = 1.0 #.1,3,1.5
     action_rate_reward_scale = -0.1
     
     # Part 5 - Additional reward scales
@@ -99,7 +99,7 @@ class Rob6323Go2EnvCfg(DirectRLEnvCfg):
         stiffness=0.0,  # CRITICAL: Set to 0 to disable implicit P-gain
         damping=0.0,    # CRITICAL: Set to 0 to disable implicit D-gain
     )
-
+ 
     # scene
     scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=4096, env_spacing=4.0, replicate_physics=True)
     contact_sensor: ContactSensorCfg = ContactSensorCfg(
