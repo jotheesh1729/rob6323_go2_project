@@ -128,22 +128,27 @@ class Rob6323Go2Env(DirectRLEnv):
 
 
     def _apply_action(self) -> None:
+        # PD control torque
+        pos_error = self.desired_joint_pos - self.robot.data.joint_pos
+        vel_error = self.robot.data.joint_vel
+        torques_pd = self.Kp * pos_error - self.Kd * vel_error
         
-        torques_pd = self.Kp * (self.desired_joint_pos - self.robot.data.joint_pos) - self.Kd * self.robot.data.joint_vel
-        #compute friction torques
+        # Joint friction model
         joint_vel = self.robot.data.joint_vel
         tau_stiction = self.friction_Fs * torch.tanh(joint_vel / 0.1)
         tau_viscous = self.friction_mu * joint_vel
         self.tau_friction = tau_stiction + tau_viscous
         
-        #apply friction to PD out
+        # Total commanded torque
         torques = torques_pd - self.tau_friction
+        torques = torch.clamp(torques, -self.torque_limits, self.torque_limits)
         
-        #clip to torque lim
-        torques = torch.clip(torques, -self.torque_limits, self.torque_limits)
+        # Store torques for reward computation and logging
+        self.torques = torques
         
-        #apply torques to the robot
+        # Apply torques to simulator
         self.robot.set_joint_effort_target(torques)
+
 
     def _get_observations(self) -> dict:
         self._previous_actions = self._actions.clone()
@@ -209,7 +214,9 @@ class Rob6323Go2Env(DirectRLEnv):
         # Update the prev action hist (roll buffer and insert new action)
         self.last_actions = torch.roll(self.last_actions, 1, 2)
         self.last_actions[:, :, 0] = self._actions[:]
-        friction_loss = torch.sum(torch.abs(self.tau_friction * self.robot.data.joint_vel), dim=1)
+        # friction_loss = torch.sum(torch.abs(self.tau_friction * self.robot.data.joint_vel), dim=1)
+        friction_loss = torch.sum(torch.abs(self.tau_friction), dim=1)
+
         # Add to rewards dict
         rewards = {
             "track_lin_vel_xy_exp": lin_vel_error_mapped * self.cfg.lin_vel_reward_scale, # Removed step_dt

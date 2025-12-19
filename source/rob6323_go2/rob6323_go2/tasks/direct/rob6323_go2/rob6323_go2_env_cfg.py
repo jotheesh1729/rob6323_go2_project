@@ -41,7 +41,7 @@ class Rob6323Go2EnvCfg(DirectRLEnvCfg):
     friction_mu_max = 0.3
     
     # In Rob6323Go2EnvCfg
-    base_height_min = 0.05  # Terminate if base is lower than 20cm
+    base_height_min = 0.05  # Terminate if base is lower than 5cm
     
     # Part 5 - Additional reward scales
     orient_reward_scale = -5.0
