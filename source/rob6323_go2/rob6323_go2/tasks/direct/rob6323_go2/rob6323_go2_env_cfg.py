@@ -62,6 +62,9 @@ class Rob6323Go2EnvCfg(DirectRLEnvCfg):
     Kd = 0.5   # Derivative gain
     torque_limits = 100.0  # Max torque
 
+    #randomization
+    events: EventCfg = EventCfg() #from documentation
+
     # simulation
     sim: SimulationCfg = SimulationCfg(
         dt=1 / 200,
