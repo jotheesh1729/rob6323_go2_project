@@ -36,6 +36,7 @@ class Rob6323Go2Env(DirectRLEnv):
             self.num_envs, gym.spaces.flatdim(self.single_action_space), device=self.device
         )
         self.last_actions = torch.zeros(self.num_envs, gym.spaces.flatdim(self.single_action_space), 3, dtype=torch.float, device=self.device, requires_grad=False)
+        
         # foot placement vars for --> part 4
         self._feet_ids = []
         self._feet_ids_sensor = [] # contact sensor id --> part 6
@@ -45,11 +46,16 @@ class Rob6323Go2Env(DirectRLEnv):
             self._feet_ids.append(id_list[0])
             sensor_id_list, _ = self._contact_sensor.find_bodies(name)
             self._feet_ids_sensor.append(sensor_id_list[0])
+
         # PD control parameters -- part 2
         self.Kp = torch.tensor([cfg.Kp] * 12, device=self.device).unsqueeze(0).repeat(self.num_envs, 1)
         self.Kd = torch.tensor([cfg.Kd] * 12, device=self.device).unsqueeze(0).repeat(self.num_envs, 1)
         self.motor_offsets = torch.zeros(self.num_envs, 12, device=self.device)
         self.torque_limits = cfg.torque_limits
+
+        # actuator friction coeff init
+        self.stiction_coeff = torch.zeros(self.num_envs, 12, device=self.device)
+        self.viscous_coeff = torch.zeros(self.num_envs, 12, device=self.device)
 
         # X/Y linear velocity and yaw angular velocity commands
         self._commands = torch.zeros(self.num_envs, 3, device=self.device)
@@ -112,7 +118,13 @@ class Rob6323Go2Env(DirectRLEnv):
         )
 
     def _apply_action(self) -> None:
-        # self.robot.set_joint_position_target(self._processed_actions)
+        # self.robot.set_joint_position_target(self._processed_actions) --> from baseline
+
+        # Compute friction torques
+        stiction = self.stiction_coeff * torch.tanh(self.robot.data.joint_vel / 0.1)
+        viscous = self.viscous_coeff * self.robot.data.joint_vel
+        actuator_friction_torque = stiction + viscous
+
         # Compute PD torques -- part 2
         torques = torch.clip(
             (
@@ -121,10 +133,12 @@ class Rob6323Go2Env(DirectRLEnv):
                     - self.robot.data.joint_pos 
                 )
                 - self.Kd * self.robot.data.joint_vel
+                - actuator_friction_torque #subtracting the friction torque
             ),
             -self.torque_limits,
             self.torque_limits,
         )
+
 
         # Apply torques to the robot -- part 2
         self.robot.set_joint_effort_target(torques)
@@ -191,7 +205,7 @@ class Rob6323Go2Env(DirectRLEnv):
         #roll/pitch penalty
         rew_ang_vel_xy = torch.norm(self.robot.data.root_ang_vel_b[:, :2],dim=-1)
 
-        #part 6 --> adding reward function from go2_terrain from isaac gym
+        #part 6 --> adding reward function from go2_terrain from isaac gym for foot clearance
         phases = 1 - torch.abs(1.0 - torch.clip((self.foot_indices * 2.0) - 1.0, 0.0, 1.0) * 2.0)
         foot_height = self.foot_positions_w[:, :, 2] # - reference_heights
         target_height = 0.08 * phases + 0.02 # offset for foot radius 2cm with 8cm clearance
@@ -240,17 +254,24 @@ class Rob6323Go2Env(DirectRLEnv):
         if env_ids is None or len(env_ids) == self.num_envs:
             env_ids = self.robot._ALL_INDICES
         self.robot.reset(env_ids)
+
         #part-4 --> reset foot gait
         self.gait_indices[env_ids] = 0
         super()._reset_idx(env_ids)
         if len(env_ids) == self.num_envs:
             # Spread out the resets to avoid spikes in training when many environments reset at a similar time
             self.episode_length_buf[:] = torch.randint_like(self.episode_length_buf, high=int(self.max_episode_length))
+
         self._actions[env_ids] = 0.0
         self._previous_actions[env_ids] = 0.0
         self.last_actions[env_ids] = 0.0   # -- part 1
+
         # Sample new commands
         self._commands[env_ids] = torch.zeros_like(self._commands[env_ids]).uniform_(-1.0, 1.0)
+        # sample new friction coeffs
+        self.stiction_coeff[env_ids] = torch.zeros_like(self.stiction_coeff[env_ids]).uniform_(self.cfg.actuator_st_range_min,self.cfg.actuator_st_range_max)
+        self.viscous_coeff[env_ids] = torch.zeros_like(self.viscous_coeff[env_ids]).uniform_(self.cfg.actuator_mu_range_min,self.cfg.actuator_mu_range_max)
+
         # Reset robot state
         joint_pos = self.robot.data.default_joint_pos[env_ids]
         joint_vel = self.robot.data.default_joint_vel[env_ids]
@@ -259,6 +280,7 @@ class Rob6323Go2Env(DirectRLEnv):
         self.robot.write_root_pose_to_sim(default_root_state[:, :7], env_ids)
         self.robot.write_root_velocity_to_sim(default_root_state[:, 7:], env_ids)
         self.robot.write_joint_state_to_sim(joint_pos, joint_vel, None, env_ids)
+
         # Logging
         extras = dict()
         for key in self._episode_sums.keys():

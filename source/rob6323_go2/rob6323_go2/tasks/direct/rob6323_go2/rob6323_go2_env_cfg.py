@@ -30,8 +30,13 @@ class Rob6323Go2EnvCfg(DirectRLEnvCfg):
     observation_space = 48 + 4
     state_space = 0
     debug_vis = True
-    # part -- 3
+    # part -- 3 - terminate condition
     base_height_min = 0.05 #correction to change to 5cm after suggestion
+    #Friction ranges for actuator
+    actuator_mu_range_min = 0.001 #viscous coeff
+    actuator_mu_range_max = 0.3
+    actuator_st_range_min = 0.001 #stiction coeff
+    actuator_st_range_max = 2.5
 
     # PD control gains -- part 2
     Kp = 20.0  # Proportional gain
@@ -109,3 +114,5 @@ class Rob6323Go2EnvCfg(DirectRLEnvCfg):
     #part --6 contact forces and foot clearance
     feet_clearance_reward_scale = -40.0 # changed by 10 to check performance
     tracking_contacts_shaped_force_reward_scale = 4.0
+    #torque magnitude penalty
+    torque_reward_scale = -0.0001
