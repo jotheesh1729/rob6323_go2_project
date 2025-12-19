@@ -122,7 +122,7 @@ class Rob6323Go2EnvCfg(DirectRLEnvCfg):
     current_vel_visualizer_cfg.markers["arrow"].scale = (0.5, 0.5, 0.5)
 
     # reward scales
-    lin_vel_reward_scale = 1.0
+    lin_vel_reward_scale = 0.8 #decreased the reward, as giving high variance gradient
     yaw_rate_reward_scale = 0.5
     #part-1 change
     action_rate_reward_scale = -0.1
@@ -131,10 +131,10 @@ class Rob6323Go2EnvCfg(DirectRLEnvCfg):
     #part --5 unnatural walking penalties
     orient_reward_scale = -5.0
     lin_vel_z_reward_scale = -0.02
-    dof_vel_reward_scale = -0.001 #increased penalty for fast joint motion
+    dof_vel_reward_scale = -0.0003 #increased penalty for fast joint motion
     ang_vel_xy_reward_scale = -0.001
     #part --6 contact forces and foot clearance
-    feet_clearance_reward_scale = -20.0 # changed by 10 to check performance
+    feet_clearance_reward_scale = -40.0 # changed by 10 to check performance
     tracking_contacts_shaped_force_reward_scale = 4.0
     #torque magnitude penalty
     torque_reward_scale = -0.0001
