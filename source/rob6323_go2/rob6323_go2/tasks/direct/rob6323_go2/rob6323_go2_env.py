@@ -453,8 +453,6 @@ class Rob6323Go2Env(DirectRLEnv):
         return reward
     
     def _reward_feet_clearance(self):
-        """Penalize feet that are too close to the ground during swing phase."""
-        # Compute swing phase (0 at start/end, 1 at mid-swing)
         phases = 1 - torch.abs(1.0 - torch.clip((self.foot_indices * 2.0) - 1.0, 0.0, 1.0) * 2.0)
         
         # Get foot heights
@@ -473,8 +471,6 @@ class Rob6323Go2Env(DirectRLEnv):
         return reward
     
     def _reward_tracking_contacts_shaped_force(self):
-        """Penalize contact forces during swing phase."""
-        # Get contact forces using Isaac Lab API
         contact_forces_3d = self._contact_sensor.data.net_forces_w[:, self._feet_ids_sensor, :]
         
         # Compute force magnitude for each foot
