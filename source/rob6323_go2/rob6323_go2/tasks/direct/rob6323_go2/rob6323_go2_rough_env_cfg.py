@@ -3,6 +3,8 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
+USE_FLAT = False
+
 from isaaclab.actuators.actuator_cfg import ImplicitActuatorCfg
 from isaaclab_assets.robots.unitree import UNITREE_GO2_CFG
 
@@ -44,7 +46,7 @@ class Rob6323Go2RoughEnvCfg(DirectRLEnvCfg):
     torque_limits = 100.0
 
     # early stopping
-    base_height_min = -999.0
+    base_height_min = 0.05 if USE_FLAT else -999.0
 
     # reward scales
     lin_vel_reward_scale = 1.0
@@ -69,26 +71,42 @@ class Rob6323Go2RoughEnvCfg(DirectRLEnvCfg):
         ),
     )
 
-    terrain = TerrainImporterCfg(
-        prim_path="/World/ground",
-        terrain_type="generator",
-        terrain_generator=ROUGH_TERRAINS_CFG,
-        max_init_terrain_level=5,
-        collision_group=-1,
-        physics_material=sim_utils.RigidBodyMaterialCfg(
-            friction_combine_mode="multiply",
-            restitution_combine_mode="multiply",
-            static_friction=1.0,
-            dynamic_friction=1.0,
-            restitution=0.0,
-        ),
-        visual_material=sim_utils.MdlFileCfg(
-            mdl_path=f"{ISAACLAB_NUCLEUS_DIR}/Materials/TilesMarbleSpiderWhiteBrickBondHoned/TilesMarbleSpiderWhiteBrickBondHoned.mdl",
-            project_uvw=True,
-            texture_scale=(0.25, 0.25),
-        ),
-        debug_vis=False,
-    )
+    # terrain
+    if USE_FLAT:
+        terrain = TerrainImporterCfg(
+            prim_path="/World/ground",
+            terrain_type="plane",
+            collision_group=-1,
+            physics_material=sim_utils.RigidBodyMaterialCfg(
+                friction_combine_mode="multiply",
+                restitution_combine_mode="multiply",
+                static_friction=1.0,
+                dynamic_friction=1.0,
+                restitution=0.0,
+            ),
+            debug_vis=False,
+        )
+    else:
+        terrain = TerrainImporterCfg(
+            prim_path="/World/ground",
+            terrain_type="generator",
+            terrain_generator=ROUGH_TERRAINS_CFG,
+            max_init_terrain_level=5,
+            collision_group=-1,
+            physics_material=sim_utils.RigidBodyMaterialCfg(
+                friction_combine_mode="multiply",
+                restitution_combine_mode="multiply",
+                static_friction=1.0,
+                dynamic_friction=1.0,
+                restitution=0.0,
+            ),
+            visual_material=sim_utils.MdlFileCfg(
+                mdl_path=f"{ISAACLAB_NUCLEUS_DIR}/Materials/TilesMarbleSpiderWhiteBrickBondHoned/TilesMarbleSpiderWhiteBrickBondHoned.mdl",
+                project_uvw=True,
+                texture_scale=(0.25, 0.25),
+            ),
+            debug_vis=False,
+        )
 
     # robot(s)
     robot_cfg: ArticulationCfg = UNITREE_GO2_CFG.replace(prim_path="/World/envs/env_.*/Robot")
@@ -120,7 +138,7 @@ class Rob6323Go2RoughEnvCfg(DirectRLEnvCfg):
 
     def __post_init__(self):
         """Post initialization - scale down terrains for Go2."""
-        if self.terrain.terrain_generator is not None:
+        if not USE_FLAT and self.terrain.terrain_generator is not None:
             # Scale down the terrains because the Go2 robot is small
             self.terrain.terrain_generator.sub_terrains["boxes"].grid_height_range = (0.025, 0.1)
             self.terrain.terrain_generator.sub_terrains["random_rough"].noise_range = (0.01, 0.06)
