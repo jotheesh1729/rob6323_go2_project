@@ -390,44 +390,41 @@ This randomizes the friction properties of all robot body parts on each episode 
 
 ### Create Rough Terrain Configuration
 
-Create `rob6323_go2_rough_env_cfg.py` with terrain generator:
+Create `rob6323_go2_rough_env_cfg.py` with generator. It has the following unique elements:
 
 ```python
-from isaaclab.terrains.config.rough import ROUGH_TERRAINS_CFG
-from isaaclab.sensors import RayCasterCfg, patterns
-
-observation_space = 48 + 4 + 160  # 160 height scan points
+USE_FLAT = False # used for curriculum learning
 
 terrain = TerrainImporterCfg(
-    prim_path="/World/ground",
-    terrain_type="generator",
-    terrain_generator=ROUGH_TERRAINS_CFG,
-    max_init_terrain_level=5,
-    collision_group=-1,
-    physics_material=sim_utils.RigidBodyMaterialCfg(
-        friction_combine_mode="multiply",
-        restitution_combine_mode="multiply",
-        static_friction=1.0,
-        dynamic_friction=1.0,
-        restitution=0.0,
-    ),
-    debug_vis=False,
-)
-
-height_scanner: RayCasterCfg = RayCasterCfg(
-    prim_path="/World/envs/env_.*/Robot/base",
-    offset=RayCasterCfg.OffsetCfg(pos=(0.0, 0.0, 20.0)),
-    ray_alignment="yaw",
-    pattern_cfg=patterns.GridPatternCfg(resolution=0.1, size=[1.6, 1.0]),
-    debug_vis=False,
-    mesh_prim_paths=["/World/ground"],
-)
+            prim_path="/World/ground",
+            terrain_type="generator",
+            terrain_generator=ROUGH_TERRAINS_CFG,
+            max_init_terrain_level=5,
+            collision_group=-1,
+            physics_material=sim_utils.RigidBodyMaterialCfg(
+                friction_combine_mode="multiply",
+                restitution_combine_mode="multiply",
+                static_friction=1.0,
+                dynamic_friction=1.0,
+                restitution=0.0,
+            ),
+            visual_material=sim_utils.MdlFileCfg(
+                mdl_path=f"{ISAACLAB_NUCLEUS_DIR}/Materials/TilesMarbleSpiderWhiteBrickBondHoned/TilesMarbleSpiderWhiteBrickBondHoned.mdl",
+                project_uvw=True,
+                texture_scale=(0.25, 0.25),
+            ),
+            debug_vis=False,
+        )
 
 def __post_init__(self):
-    self.terrain.terrain_generator.sub_terrains["boxes"].grid_height_range = (0.025, 0.1)
-    self.terrain.terrain_generator.sub_terrains["random_rough"].noise_range = (0.01, 0.06)
-    self.terrain.terrain_generator.sub_terrains["random_rough"].noise_step = 0.01
-    self.terrain.terrain_generator.curriculum = False
+        """Post initialization - scale down terrains for Go2."""
+        if not USE_FLAT and self.terrain.terrain_generator is not None:
+            # Scale down the terrains because the Go2 robot is small
+            self.terrain.terrain_generator.sub_terrains["boxes"].grid_height_range = (0.025, 0.1)
+            self.terrain.terrain_generator.sub_terrains["random_rough"].noise_range = (0.01, 0.06)
+            self.terrain.terrain_generator.sub_terrains["random_rough"].noise_step = 0.01
+            # Disable curriculum for now
+            self.terrain.terrain_generator.curriculum = False
 ```
 
 ### Create Rough Terrain Environment
@@ -474,6 +471,41 @@ class Rob6323Go2RoughEnv(Rob6323Go2Env):
         return observations
 ```
 
+### Update PPO config
+update `rsl_rl_ppo_cfg.py`. Notice here we increase the network size to [512, 256, 128] for both actor and critic, following the recommendation from the Anymal C environment.
+
+```python
+@configclass
+class PPORunnerRoughCfg(RslRlOnPolicyRunnerCfg):
+    num_steps_per_env = 32
+    max_iterations = 500
+    save_interval = 50
+    experiment_name = "go2_rough_direct"
+    policy = RslRlPpoActorCriticCfg(
+        init_noise_std=1.0,
+        actor_obs_normalization=True,
+        critic_obs_normalization=True,
+        actor_hidden_dims=[512, 256, 128],
+        critic_hidden_dims=[512, 256, 128],
+        activation="elu",
+    )
+    algorithm = RslRlPpoAlgorithmCfg(
+        value_loss_coef=4.0,
+        use_clipped_value_loss=True,
+        clip_param=0.2,
+        entropy_coef=0.0,
+        num_learning_epochs=5,
+        num_mini_batches=4,
+        learning_rate=3.0e-4,
+        schedule="adaptive",
+        gamma=0.99,
+        lam=0.95,
+        desired_kl=0.008,
+        max_grad_norm=1.0,
+    )
+
+```
+
 ### Register Environment
 
 Update `__init__.py`:
@@ -490,167 +522,30 @@ gym.register(
 )
 ```
 
-### Create new train_rough.sh and train_rough.slurm for executing rough terrain
-
-Create `train_rough.sh`
-
-```shell
-#!/usr/bin/env bash
-ssh -o StrictHostKeyChecking=accept-new burst "cd ~/rob6323_go2_project && sbatch --job-name='rob6323_rough_${USER}' --mail-user='${USER}@nyu.edu' train_rough.slurm '$@'"
-```
-
-Create `train_rough.slurm`
-
-```shell
-#!/bin/bash
-
-#SBATCH --requeue
-#SBATCH --nodes=1
-#SBATCH --ntasks-per-node=1
-#SBATCH --cpus-per-task=10
-#SBATCH --mem=20GB
-#SBATCH --time=02:00:00
-#SBATCH --gres=gpu:1
-#SBATCH --mail-type=END
-#SBATCH --account=rob_gy6323-2025fa
-#SBATCH --partition=g2-standard-12
-#SBATCH --output=../slurm_%j.out
-#SBATCH --error=../slurm_%j.err
-
-set -euo pipefail
-
-# -------------------------------
-# Project workspace bootstrap
-# -------------------------------
-PROJECT_NAME="rob6323_go2_project"
-REMOTE_HOST="greene-dtn"
-LOCAL_PROJECT="${HOME}/${PROJECT_NAME}"
-REMOTE_PROJECT="${HOME}/${PROJECT_NAME}"
-ISAACLAB_DIR="/scratch/$USER/IsaacLab"
-
-# Ensure local project exists and mirrors remote (first time creates it)
-mkdir -p "${LOCAL_PROJECT}"
-rsync -az --delete --mkpath -e "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o GlobalKnownHostsFile=/dev/null" \
-    "${REMOTE_HOST}:${REMOTE_PROJECT}/" \
-    "${LOCAL_PROJECT}/"
-
-mkdir -p "${ISAACLAB_DIR}"
-rsync -az --delete --mkpath -e "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o GlobalKnownHostsFile=/dev/null" \
-    "${REMOTE_HOST}:${ISAACLAB_DIR}/" \
-    "${ISAACLAB_DIR}/"
-
-# -------------------------------
-# Hardcode your cluster paths
-# -------------------------------
-SIF_IMAGE="/scratch/$USER/isaac-lab-base.sif"
-RUN_DIR="${LOCAL_PROJECT}"                       # run inside the mirrored project
-PERSISTENT_CACHE_DIR="/scratch/$USER/docker-isaac-sim"
-PERSISTENT_LOGS_DIR="/scratch/$USER/isaaclab/logs/${SLURM_JOB_ID}"
-
-# Isaac Sim container paths
-DOCKER_ISAACSIM_ROOT_PATH="/isaac-sim"
-DOCKER_USER_HOME="/root"
-
-# Node-local cache & execution
-NODE_TMP="${SLURM_TMPDIR:-${TMPDIR:-/tmp}}"
-CACHE_ROOT="${NODE_TMP}/docker-isaac-sim"
-mkdir -p \
-  "${CACHE_ROOT}/cache/kit" \
-  "${CACHE_ROOT}/cache/ov" \
-  "${CACHE_ROOT}/cache/pip" \
-  "${CACHE_ROOT}/cache/glcache" \
-  "${CACHE_ROOT}/cache/computecache" \
-  "${CACHE_ROOT}/logs" \
-  "${CACHE_ROOT}/data" \
-  "${CACHE_ROOT}/documents" \
-  "${CACHE_ROOT}/kit-data"
-
-mkdir -p "${PERSISTENT_LOGS_DIR}"
-touch "${PERSISTENT_LOGS_DIR}/.keep"
-
-# Prefer node-local tmp for apptainer/singularity scratch
-export APPTAINER_TMPDIR="${NODE_TMP}"
-export APPTAINER_CACHEDIR="${NODE_TMP}/apptainer-cache"
-
-# Forward all user args to eval.py
-export ISAAC_ARGS="$*"
-echo "$ISAAC_ARGS"
-
-# Execute with GPU and required binds
-singularity exec \
-  --nv --containall \
-  -B "${CACHE_ROOT}/kit-data:${DOCKER_ISAACSIM_ROOT_PATH}/kit/data:rw" \
-  -B "${CACHE_ROOT}/cache/kit:${DOCKER_ISAACSIM_ROOT_PATH}/kit/cache:rw" \
-  -B "${CACHE_ROOT}/cache/ov:${DOCKER_USER_HOME}/.cache/ov:rw" \
-  -B "${CACHE_ROOT}/cache/pip:${DOCKER_USER_HOME}/.cache/pip:rw" \
-  -B "${CACHE_ROOT}/cache/glcache:${DOCKER_USER_HOME}/.cache/nvidia/GLCache:rw" \
-  -B "${CACHE_ROOT}/cache/computecache:${DOCKER_USER_HOME}/.nv/ComputeCache:rw" \
-  -B "${CACHE_ROOT}/logs:${DOCKER_USER_HOME}/.nvidia-omniverse/logs:rw" \
-  -B "${CACHE_ROOT}/data:${DOCKER_USER_HOME}/.local/share/ov/data:rw" \
-  -B "${CACHE_ROOT}/documents:${DOCKER_USER_HOME}/Documents:rw" \
-  -B "${ISAACLAB_DIR}:/workspace/isaaclab:rw" \
-  -B "${PERSISTENT_LOGS_DIR}:/workspace/isaaclab/logs:rw" \
-  -B "${RUN_DIR}:/workspace/run:rw" \
-  "${SIF_IMAGE}" bash -lc '
-set -euo pipefail
-
-cd /workspace/isaaclab
-export ISAACLAB_PATH=/workspace/isaaclab
-
-# Ensure the local package is installed in the container Python
-
-/isaac-sim/python.sh -m pip install -e /workspace/run/source/rob6323_go2
-
-/isaac-sim/python.sh /workspace/run/scripts/rsl_rl/train.py \
-  --task=Template-Rob6323-Go2-Direct-Rough-v0 \
-  --headless
-
-# Identify the latest-created/modified subdirectory under go2_rough_direct
-LATEST_DIR=$(ls -td /workspace/isaaclab/logs/rsl_rl/go2_rough_direct/*/ 2>/dev/null | head -n 1 || true)
-if [[ -z "${LATEST_DIR:-}" ]]; then
-  echo "No subdirectories found under /workspace/isaaclab/logs/rsl_rl/go2_rough_direct" >&2
-  exit 1
-fi
-LATEST_DIR="${LATEST_DIR%/}"
-
-# Run evaluation with the discovered checkpoint
-/isaac-sim/python.sh /workspace/run/scripts/rsl_rl/play.py \
-  --task=Template-Rob6323-Go2-Direct-Rough-v0 \
-  --checkpoint "${LATEST_DIR}/model_499.pt" \
-  --video \
-  --video_length 1000 \
-  --headless
-'
-
-rsync -az --delete \
-  --exclude='*.err' \
-  --exclude='*.out' \
-  -e "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o GlobalKnownHostsFile=/dev/null" \
-  "${PERSISTENT_LOGS_DIR}/" \
-  "${REMOTE_HOST}:${REMOTE_PROJECT}/logs/${SLURM_JOB_ID}/"
-```
-
 ## Training Instructions
 
-### Train Flat Terrain with Friction Model
+To train the robot on uneven surfaces, we employ a two-stage curriculum learning approach: first, we train on rough terrain using the identical reward structure from the flat environment, allowing the policy to adapt to height variations while maintaining learned gait patterns. In the second stage, we remove the Raibert heuristic and gait phasing rewards, as these overly constrain foot placement and timing on irregular surfaces where strict trotting patterns are suboptimal. Training resumes from the final flat environment checkpoint, enabling the policy to develop more adaptive locomotion strategies.
+
+### Train Flat Terrain
+In `rob6323_go2_rough_env_cfg.py` ensure `USE_FLAT=True`
 
 ```bash
 cd $HOME/rob6323_go2_project
-./train.sh
+./train_rough.sh
 ```
 
 ### Train Rough Terrain
 
+We want to launch the last completed checkpoint. You'll want to replace <last_run_name> with the timestamp of the last completed run, which will be located under the `logs/[job_id]rsl_rl/go2_rough_direct` folder
+
 ```bash
 cd $HOME/rob6323_go2_project
-./train_rough.sh 
+./train_rough.sh --video --resume --load_run <last_run_name>
 ```
-
-Note: Reduce number of environments to 2048 for rough terrain to avoid PhysX buffer overflow.
 
 ### Evaluation
 
-After training completes, logs will be in `logs/[job_id]/rsl_rl/go2_flat_direct/[timestamp]/`. Download and view with TensorBoard:
+After training completes, logs will be in `logs/[job_id]/rsl_rl/go2_rough_direct/[timestamp]/`. Download and view with TensorBoard:
 
 ```bash
 rsync -avzP <netid>@dtn.hpc.nyu.edu:/home/<netid>/rob6323_go2_project/logs ./
