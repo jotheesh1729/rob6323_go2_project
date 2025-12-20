@@ -165,3 +165,896 @@ The suggested way to inspect these logs is via the Open OnDemand web interface:
 
 ---
 Students should only edit README.md below this ligne.
+
+# Isaac Lab Advanced Locomotion Tutorial: From Basic to Expert
+
+In this tutorial, you will learn how to extend a basic `DirectRLEnv` implementation for the Unitree Go2 robot into a sophisticated locomotion controller. We will start with a minimal environment and progressively add features used in modern reinforcement learning research.
+
+**What you will learn:**
+1.  **Adding State Variables**: How to track history and internal states (like previous actions and gait phases).
+2.  **Custom Controllers**: Implementing a low-level PD controller with manual torque calculation.
+3.  **Termination Criteria**: Adding early stops based on robot state (e.g., base height).
+4.  **Advanced Rewards**: Implementing the Raibert Heuristic for precise foot placement.
+5.  **Observation Expansion**: Adding new signals to the policy input.
+
+---
+
+## Part 1: Adding Action Rate Penalties (State History)
+
+Smooth motion requires penalizing jerky actions. To do this, we need to track the history of actions taken by the policy.
+
+### 1.1 Update Configuration
+First, define the reward scale in your configuration file.
+
+```python
+# In Rob6323Go2EnvCfg (source/rob6323_go2/rob6323_go2/tasks/direct/rob6323_go2/rob6323_go2_env_cfg.py)
+
+# reward scales
+action_rate_reward_scale = -0.1
+```
+
+### 1.2 Update `__init__`
+We need a buffer to store the last few actions. We'll store a history of length 3 (current + 2 previous). Also, update the logging keys to track this new reward.
+
+```python
+# In Rob6323Go2Env.__init__ (source/rob6323_go2/rob6323_go2/tasks/direct/rob6323_go2/rob6323_go2_env.py)
+
+# Update Logging
+self._episode_sums = {
+    key: torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+    for key in [
+        "track_lin_vel_xy_exp",
+        "track_ang_vel_z_exp",
+        "rew_action_rate",     # <--- Added
+        "raibert_heuristic"    # <--- Added
+    ]
+}
+
+# variables needed for action rate penalization
+# Shape: (num_envs, action_dim, history_length)
+self.last_actions = torch.zeros(self.num_envs, gym.spaces.flatdim(self.single_action_space), 3, dtype=torch.float, device=self.device, requires_grad=False)
+```
+
+### 1.3 Update `_reset_idx`
+When an environment resets, we must clear this history so the new episode starts fresh.
+
+```python
+# In Rob6323Go2Env._reset_idx
+
+# Reset last actions hist
+self.last_actions[env_ids] = 0.
+```
+
+### 1.4 Update `_get_rewards`
+We calculate the "rate" (first derivative) and "acceleration" (second derivative) of the actions to penalize high-frequency oscillations. Note that we removed `self.step_dt` from the original tracking rewards to align with standard implementations.
+
+```python
+# In Rob6323Go2Env._get_rewards
+
+# action rate penalization
+# First derivative (Current - Last)
+rew_action_rate = torch.sum(torch.square(self._actions - self.last_actions[:, :, 0]), dim=1) * (self.cfg.action_scale ** 2)
+# Second derivative (Current - 2*Last + 2ndLast)
+rew_action_rate += torch.sum(torch.square(self._actions - 2 * self.last_actions[:, :, 0] + self.last_actions[:, :, 1]), dim=1) * (self.cfg.action_scale ** 2)
+
+# Update the prev action hist (roll buffer and insert new action)
+self.last_actions = torch.roll(self.last_actions, 1, 2)
+self.last_actions[:, :, 0] = self._actions[:]
+
+# Add to rewards dict
+rewards = {
+    "track_lin_vel_xy_exp": lin_vel_error_mapped * self.cfg.lin_vel_reward_scale, # Removed step_dt
+    "track_ang_vel_z_exp": yaw_rate_error_mapped * self.cfg.yaw_rate_reward_scale, # Removed step_dt
+    "rew_action_rate": rew_action_rate * self.cfg.action_rate_reward_scale,
+}
+```
+
+---
+
+## Part 2: Implementing a Low-Level PD Controller
+
+Instead of relying on the physics engine's implicit PD controller, we will implement our own torque-level control. This gives us full control over the gains and limits.
+
+### 2.1 Update Configuration
+First, disable the built-in PD controller in the config and define our custom gains.
+
+```python
+# In Rob6323Go2EnvCfg
+# add this import:
+from isaaclab.actuators import ImplicitActuatorCfg
+
+# PD control gains
+Kp = 20.0  # Proportional gain
+Kd = 0.5   # Derivative gain
+torque_limits = 100.0  # Max torque
+
+# Update robot_cfg
+robot_cfg: ArticulationCfg = UNITREE_GO2_CFG.replace(prim_path="/World/envs/env_.*/Robot")
+# "base_legs" is an arbitrary key we use to group these actuators
+robot_cfg.actuators["base_legs"] = ImplicitActuatorCfg(
+    joint_names_expr=[".*_hip_joint", ".*_thigh_joint", ".*_calf_joint"],
+    effort_limit=23.5,
+    velocity_limit=30.0,
+    stiffness=0.0,  # CRITICAL: Set to 0 to disable implicit P-gain
+    damping=0.0,    # CRITICAL: Set to 0 to disable implicit D-gain
+)
+```
+
+### 2.2 Initialize Controller Parameters
+In the environment class, we load these gains into tensors for efficient computation.
+
+```python
+# In Rob6323Go2Env.__init__
+
+# PD control parameters
+self.Kp = torch.tensor([cfg.Kp] * 12, device=self.device).unsqueeze(0).repeat(self.num_envs, 1)
+self.Kd = torch.tensor([cfg.Kd] * 12, device=self.device).unsqueeze(0).repeat(self.num_envs, 1)
+self.motor_offsets = torch.zeros(self.num_envs, 12, device=self.device)
+self.torque_limits = cfg.torque_limits
+```
+
+### 2.3 Implement Control Logic
+We calculate the torques manually using the standard PD formula: $\tau = K_p (q_{des} - q) - K_d \dot{q}$.
+
+```python
+# In Rob6323Go2Env
+
+def _pre_physics_step(self, actions: torch.Tensor) -> None:
+    self._actions = actions.clone()
+    # Compute desired joint positions from policy actions
+    self.desired_joint_pos = (
+        self.cfg.action_scale * self._actions 
+        + self.robot.data.default_joint_pos
+    )
+
+def _apply_action(self) -> None:
+    # Compute PD torques
+    torques = torch.clip(
+        (
+            self.Kp * (
+                self.desired_joint_pos 
+                - self.robot.data.joint_pos 
+            )
+            - self.Kd * self.robot.data.joint_vel
+        ),
+        -self.torque_limits,
+        self.torque_limits,
+    )
+
+    # Apply torques to the robot
+    self.robot.set_joint_effort_target(torques)
+```
+
+---
+
+## Part 3: Early Stopping (Min Base Height)
+
+To speed up training, we should terminate episodes early if the robot falls down or collapses. It will also help learning that the base should stay elevated.
+
+### 3.1 Update Configuration
+Define the threshold for termination.
+
+```python
+# In Rob6323Go2EnvCfg
+base_height_min = 0.20  # Terminate if base is lower than 20cm
+```
+
+### 3.2 Update `_get_dones`
+Check the robot's base height (z-coordinate) against the threshold.
+
+```python
+# In Rob6323Go2Env._get_dones
+
+# terminate if base is too low
+base_height = self.robot.data.root_pos_w[:, 2]
+cstr_base_height_min = base_height < self.cfg.base_height_min
+
+# apply all terminations
+died = cstr_termination_contacts | cstr_upsidedown | cstr_base_height_min
+return died, time_out
+```
+
+---
+
+## Part 4: Raibert Heuristic (Gait Shaping)
+
+The Raibert Heuristic is a classic control strategy that places feet to stabilize velocity. We will use it as a "teacher" reward to encourage the policy to learn proper stepping. For reference logic, see [IsaacGymEnvs implementation](https://github.com/Jogima-cyber/IsaacGymEnvs/blob/e351da69e05e0433e746cef0537b50924fd9fdbf/isaacgymenvs/tasks/go2_terrain.py#L670).
+
+### 4.1 Update Configuration
+Define the reward scales and increase observation space to include clock inputs (4 phases).
+
+```python
+# In Rob6323Go2EnvCfg
+
+observation_space = 48 + 4  # Added 4 for clock inputs
+
+raibert_heuristic_reward_scale = -10.0
+feet_clearance_reward_scale = -30.0
+tracking_contacts_shaped_force_reward_scale = 4.0
+```
+
+### 4.2 Setup State Variables
+We need to track the "phase" of the gait and identify feet bodies.
+
+```python
+# In Rob6323Go2Env.__init__
+
+# Get specific body indices
+self._feet_ids = []
+foot_names = ["FL_foot", "FR_foot", "RL_foot", "RR_foot"]
+for name in foot_names:
+    id_list, _ = self.robot.find_bodies(name)
+    self._feet_ids.append(id_list[0])
+
+# Variables needed for the raibert heuristic
+self.gait_indices = torch.zeros(self.num_envs, dtype=torch.float, device=self.device, requires_grad=False)
+self.clock_inputs = torch.zeros(self.num_envs, 4, dtype=torch.float, device=self.device, requires_grad=False)
+self.desired_contact_states = torch.zeros(self.num_envs, 4, dtype=torch.float, device=self.device, requires_grad=False)
+```
+
+### 4.3 Define Foot Indices Helper
+We need to know which body indices correspond to the feet to get their positions.
+
+```python
+# In Rob6323Go2Env (add new property)
+
+@property
+def foot_positions_w(self) -> torch.Tensor:
+    """Returns the feet positions in the world frame.
+    Shape: (num_envs, num_feet, 3)
+    """
+    return self.robot.data.body_pos_w[:, self._feet_ids]
+```
+
+### 4.4 Implement Gait Logic
+We implement a function that advances the gait clock and calculates where the feet *should* be based on the command velocity. We also need to reset the gait index on episode reset.
+
+```python
+# In Rob6323Go2Env._reset_idx
+# Reset raibert quantity
+self.gait_indices[env_ids] = 0
+
+# In Rob6323Go2Env (add new method)
+# Defines contact plan
+def _step_contact_targets(self):
+    frequencies = 3.
+    phases = 0.5
+    offsets = 0.
+    bounds = 0.
+    durations = 0.5 * torch.ones((self.num_envs,), dtype=torch.float32, device=self.device)
+    self.gait_indices = torch.remainder(self.gait_indices + self.step_dt * frequencies, 1.0)
+
+    foot_indices = [self.gait_indices + phases + offsets + bounds,
+                    self.gait_indices + offsets,
+                    self.gait_indices + bounds,
+                    self.gait_indices + phases]
+
+    self.foot_indices = torch.remainder(torch.cat([foot_indices[i].unsqueeze(1) for i in range(4)], dim=1), 1.0)
+
+    for idxs in foot_indices:
+        stance_idxs = torch.remainder(idxs, 1) < durations
+        swing_idxs = torch.remainder(idxs, 1) > durations
+
+        idxs[stance_idxs] = torch.remainder(idxs[stance_idxs], 1) * (0.5 / durations[stance_idxs])
+        idxs[swing_idxs] = 0.5 + (torch.remainder(idxs[swing_idxs], 1) - durations[swing_idxs]) * (
+                    0.5 / (1 - durations[swing_idxs]))
+
+    self.clock_inputs[:, 0] = torch.sin(2 * np.pi * foot_indices[0])
+    self.clock_inputs[:, 1] = torch.sin(2 * np.pi * foot_indices[1])
+    self.clock_inputs[:, 2] = torch.sin(2 * np.pi * foot_indices[2])
+    self.clock_inputs[:, 3] = torch.sin(2 * np.pi * foot_indices[3])
+
+    # von mises distribution
+    kappa = 0.07
+    smoothing_cdf_start = torch.distributions.normal.Normal(0, kappa).cdf  # (x) + torch.distributions.normal.Normal(1, kappa).cdf(x)) / 2
+
+    smoothing_multiplier_FL = (smoothing_cdf_start(torch.remainder(foot_indices[0], 1.0)) * (
+            1 - smoothing_cdf_start(torch.remainder(foot_indices[0], 1.0) - 0.5)) +
+                                smoothing_cdf_start(torch.remainder(foot_indices[0], 1.0) - 1) * (
+                                        1 - smoothing_cdf_start(
+                                    torch.remainder(foot_indices[0], 1.0) - 0.5 - 1)))
+    smoothing_multiplier_FR = (smoothing_cdf_start(torch.remainder(foot_indices[1], 1.0)) * (
+            1 - smoothing_cdf_start(torch.remainder(foot_indices[1], 1.0) - 0.5)) +
+                                smoothing_cdf_start(torch.remainder(foot_indices[1], 1.0) - 1) * (
+                                        1 - smoothing_cdf_start(
+                                    torch.remainder(foot_indices[1], 1.0) - 0.5 - 1)))
+    smoothing_multiplier_RL = (smoothing_cdf_start(torch.remainder(foot_indices[2], 1.0)) * (
+            1 - smoothing_cdf_start(torch.remainder(foot_indices[2], 1.0) - 0.5)) +
+                                smoothing_cdf_start(torch.remainder(foot_indices[2], 1.0) - 1) * (
+                                        1 - smoothing_cdf_start(
+                                    torch.remainder(foot_indices[2], 1.0) - 0.5 - 1)))
+    smoothing_multiplier_RR = (smoothing_cdf_start(torch.remainder(foot_indices[3], 1.0)) * (
+            1 - smoothing_cdf_start(torch.remainder(foot_indices[3], 1.0) - 0.5)) +
+                                smoothing_cdf_start(torch.remainder(foot_indices[3], 1.0) - 1) * (
+                                        1 - smoothing_cdf_start(
+                                    torch.remainder(foot_indices[3], 1.0) - 0.5 - 1)))
+
+    self.desired_contact_states[:, 0] = smoothing_multiplier_FL
+    self.desired_contact_states[:, 1] = smoothing_multiplier_FR
+    self.desired_contact_states[:, 2] = smoothing_multiplier_RL
+    self.desired_contact_states[:, 3] = smoothing_multiplier_RR
+```
+
+### 4.5 Implement Raibert Reward
+We calculate the error between where the foot IS and where the Raibert Heuristic says it SHOULD be.
+
+```python
+# In Rob6323Go2Env (add new method)
+
+def _reward_raibert_heuristic(self):
+    cur_footsteps_translated = self.foot_positions_w - self.robot.data.root_pos_w.unsqueeze(1)
+    footsteps_in_body_frame = torch.zeros(self.num_envs, 4, 3, device=self.device)
+    for i in range(4):
+        footsteps_in_body_frame[:, i, :] = math_utils.quat_apply_yaw(math_utils.quat_conjugate(self.robot.data.root_quat_w),
+                                                          cur_footsteps_translated[:, i, :])
+
+    # nominal positions: [FR, FL, RR, RL]
+    desired_stance_width = 0.25
+    desired_ys_nom = torch.tensor([desired_stance_width / 2, -desired_stance_width / 2, desired_stance_width / 2, -desired_stance_width / 2], device=self.device).unsqueeze(0)
+
+    desired_stance_length = 0.45
+    desired_xs_nom = torch.tensor([desired_stance_length / 2,  desired_stance_length / 2, -desired_stance_length / 2, -desired_stance_length / 2], device=self.device).unsqueeze(0)
+
+    # raibert offsets
+    phases = torch.abs(1.0 - (self.foot_indices * 2.0)) * 1.0 - 0.5
+    frequencies = torch.tensor([3.0], device=self.device)
+    x_vel_des = self._commands[:, 0:1]
+    yaw_vel_des = self._commands[:, 2:3]
+    y_vel_des = yaw_vel_des * desired_stance_length / 2
+    desired_ys_offset = phases * y_vel_des * (0.5 / frequencies.unsqueeze(1))
+    desired_ys_offset[:, 2:4] *= -1
+    desired_xs_offset = phases * x_vel_des * (0.5 / frequencies.unsqueeze(1))
+
+    desired_ys_nom = desired_ys_nom + desired_ys_offset
+    desired_xs_nom = desired_xs_nom + desired_xs_offset
+
+    desired_footsteps_body_frame = torch.cat((desired_xs_nom.unsqueeze(2), desired_ys_nom.unsqueeze(2)), dim=2)
+
+    err_raibert_heuristic = torch.abs(desired_footsteps_body_frame - footsteps_in_body_frame[:, :, 0:2])
+
+    reward = torch.sum(torch.square(err_raibert_heuristic), dim=(1, 2))
+
+    return reward
+```
+
+### 4.6 Integrate into Observations and Rewards
+Finally, expose the clock inputs to the policy and add the reward term.
+
+```python
+# In Rob6323Go2Env._get_observations
+obs = torch.cat([
+    # ... existing obs ...
+    self.clock_inputs  # Add gait phase info
+], dim=-1)
+
+# In Rob6323Go2Env._get_rewards
+self._step_contact_targets() # Update gait state
+rew_raibert_heuristic = self._reward_raibert_heuristic()
+
+rewards = {
+    # ...
+    # Note: This reward is negative (penalty) in the config
+    "raibert_heuristic": rew_raibert_heuristic * self.cfg.raibert_heuristic_reward_scale,
+}
+```
+
+---
+
+
+## Part 5: Refining the Reward Function
+
+To achieve stable and natural-looking locomotion, we added penalties for unwanted behaviors that the basic velocity tracking rewards don't address.
+
+### 5.1 Update Configuration
+
+Add the following reward scales to `rob6323_go2_env_cfg.py`:
+
+```python
+# Additional reward scales
+orient_reward_scale = -5.0
+lin_vel_z_reward_scale = -0.02
+dof_vel_reward_scale = -0.0001
+ang_vel_xy_reward_scale = -0.001
+```
+
+### 5.2 Implement Reward Terms
+
+Add these reward calculations in `_get_rewards()` method in `rob6323_go2_env.py`:
+
+```python
+# Penalize non-vertical orientation
+rew_orient = torch.sum(torch.square(self.robot.data.projected_gravity_b[:, :2]), dim=1)
+
+# Penalize vertical velocity
+rew_lin_vel_z = torch.square(self.robot.data.root_lin_vel_b[:, 2])
+
+# Penalize high joint velocities
+rew_dof_vel = torch.sum(torch.square(self.robot.data.joint_vel), dim=1)
+
+# Penalize angular velocity in XY plane
+rew_ang_vel_xy = torch.sum(torch.square(self.robot.data.root_ang_vel_b[:, :2]), dim=1)
+
+# Add to rewards dictionary
+rewards = {
+    ...
+    "orient": rew_orient * self.cfg.orient_reward_scale,
+    "lin_vel_z": rew_lin_vel_z * self.cfg.lin_vel_z_reward_scale,
+    "dof_vel": rew_dof_vel * self.cfg.dof_vel_reward_scale,
+    "ang_vel_xy": rew_ang_vel_xy * self.cfg.ang_vel_xy_reward_scale,
+}
+```
+
+Update logging dictionary in `__init__`:
+
+```python
+self._episode_sums = {
+    key: torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+    for key in [
+        "track_lin_vel_xy_exp",
+        "track_ang_vel_z_exp",
+        "rew_action_rate",
+        "raibert_heuristic",
+        "orient",
+        "lin_vel_z",
+        "dof_vel",
+        "ang_vel_xy",
+    ]
+}
+```
+
+## Part 6: Advanced Foot Interaction
+
+### 6.1 Update Configuration
+
+Add reward scales in `rob6323_go2_env_cfg.py`:
+
+```python
+feet_clearance_reward_scale = -30.0
+tracking_contacts_shaped_force_reward_scale = 4.0
+```
+
+### 6.2 Find Sensor Indices
+
+In `__init__`, add separate indices for contact sensor:
+
+```python
+# Find indices in the CONTACT SENSOR (for forces)
+self._feet_ids_sensor = []
+for name in foot_names:
+    id_list, _ = self._contact_sensor.find_bodies(name)
+    self._feet_ids_sensor.append(id_list[0])
+```
+
+### 6.3 Implement Foot Clearance Reward
+
+Add this method to `rob6323_go2_env.py`:
+
+```python
+def _reward_feet_clearance(self):
+    phases = 1 - torch.abs(1.0 - torch.clip((self.foot_indices * 2.0) - 1.0, 0.0, 1.0) * 2.0)
+    foot_height = self.foot_positions_w[:, :, 2]
+    target_height = 0.08 * phases + 0.02
+    swing_mask = 1 - self.desired_contact_states
+    rew_foot_clearance = torch.square(target_height - foot_height) * swing_mask
+    reward = torch.sum(rew_foot_clearance, dim=1)
+    return reward
+```
+
+### 6.4 Implement Contact Force Tracking Reward
+
+Add this method to `rob6323_go2_env.py`:
+
+```python
+def _reward_tracking_contacts_shaped_force(self):
+    contact_forces_3d = self._contact_sensor.data.net_forces_w[:, self._feet_ids_sensor, :]
+    foot_forces = torch.norm(contact_forces_3d, dim=-1)
+    desired_contact = self.desired_contact_states
+    swing_mask = 1 - desired_contact
+    force_penalty = 1 - torch.exp(-1 * foot_forces ** 2 / 100.)
+    rew_tracking_contacts = -swing_mask * force_penalty
+    reward = torch.sum(rew_tracking_contacts, dim=1) / 4.0
+    return reward
+```
+
+### 6.5 Integrate into Rewards
+
+Update `_get_rewards()`:
+
+```python
+rew_feet_clearance = self._reward_feet_clearance()
+rew_tracking_contacts = self._reward_tracking_contacts_shaped_force()
+
+rewards = {
+    ...
+    "feet_clearance": rew_feet_clearance * self.cfg.feet_clearance_reward_scale,
+    "tracking_contacts_shaped_force": rew_tracking_contacts * self.cfg.tracking_contacts_shaped_force_reward_scale,
+}
+```
+
+Update logging in `__init__`:
+
+```python
+self._episode_sums = {
+    key: torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+    for key in [
+        ...
+        "feet_clearance",
+        "tracking_contacts_shaped_force",
+    ]
+}
+```
+
+## Bonus Task 1: Actuator Friction Model
+
+### Update Configuration
+
+Add friction parameters to `rob6323_go2_env_cfg.py`:
+
+```python
+# Friction model parameters
+use_friction_model = True
+friction_stiction_range = (0.0, 2.5)
+friction_viscous_range = (0.0, 0.3)
+```
+
+### Initialize Friction Parameters
+
+In `__init__` of `rob6323_go2_env.py`:
+
+```python
+if self.cfg.use_friction_model:
+    self.friction_stiction = torch.zeros(self.num_envs, 12, device=self.device)
+    self.friction_viscous = torch.zeros(self.num_envs, 12, device=self.device)
+```
+
+### Add Randomization in Reset
+
+In `_reset_idx()`:
+
+```python
+if self.cfg.use_friction_model:
+    self.friction_stiction[env_ids] = torch.rand(len(env_ids), 12, device=self.device) * \
+        (self.cfg.friction_stiction_range[1] - self.cfg.friction_stiction_range[0]) + \
+        self.cfg.friction_stiction_range[0]
+    self.friction_viscous[env_ids] = torch.rand(len(env_ids), 12, device=self.device) * \
+        (self.cfg.friction_viscous_range[1] - self.cfg.friction_viscous_range[0]) + \
+        self.cfg.friction_viscous_range[0]
+```
+
+### Apply Friction Model
+
+Update `_apply_action()`:
+
+```python
+def _apply_action(self) -> None:
+    torques = torch.clip(
+        (
+            self.Kp * (self.desired_joint_pos - self.robot.data.joint_pos)
+            - self.Kd * self.robot.data.joint_vel
+        ),
+        -self.torque_limits,
+        self.torque_limits,
+    )
+    
+    if self.cfg.use_friction_model:
+        tau_stiction = self.friction_stiction * torch.tanh(self.robot.data.joint_vel / 0.1)
+        tau_viscous = self.friction_viscous * self.robot.data.joint_vel
+        tau_friction = tau_stiction + tau_viscous
+        torques = torques - tau_friction
+    
+    self.robot.set_joint_effort_target(torques)
+```
+
+## Bonus Task 2: Rough Terrain Locomotion
+
+### Create Rough Terrain Configuration
+
+Create `rob6323_go2_rough_env_cfg.py` with terrain generator:
+
+```python
+from isaaclab.terrains.config.rough import ROUGH_TERRAINS_CFG
+from isaaclab.sensors import RayCasterCfg, patterns
+
+observation_space = 48 + 4 + 160  # 160 height scan points
+
+terrain = TerrainImporterCfg(
+    prim_path="/World/ground",
+    terrain_type="generator",
+    terrain_generator=ROUGH_TERRAINS_CFG,
+    max_init_terrain_level=5,
+    collision_group=-1,
+    physics_material=sim_utils.RigidBodyMaterialCfg(
+        friction_combine_mode="multiply",
+        restitution_combine_mode="multiply",
+        static_friction=1.0,
+        dynamic_friction=1.0,
+        restitution=0.0,
+    ),
+    debug_vis=False,
+)
+
+height_scanner: RayCasterCfg = RayCasterCfg(
+    prim_path="/World/envs/env_.*/Robot/base",
+    offset=RayCasterCfg.OffsetCfg(pos=(0.0, 0.0, 20.0)),
+    ray_alignment="yaw",
+    pattern_cfg=patterns.GridPatternCfg(resolution=0.1, size=[1.6, 1.0]),
+    debug_vis=False,
+    mesh_prim_paths=["/World/ground"],
+)
+
+def __post_init__(self):
+    self.terrain.terrain_generator.sub_terrains["boxes"].grid_height_range = (0.025, 0.1)
+    self.terrain.terrain_generator.sub_terrains["random_rough"].noise_range = (0.01, 0.06)
+    self.terrain.terrain_generator.sub_terrains["random_rough"].noise_step = 0.01
+    self.terrain.terrain_generator.curriculum = False
+```
+
+### Create Rough Terrain Environment
+
+Create `rob6323_go2_rough_env.py` extending the flat environment:
+
+```python
+from .rob6323_go2_env import Rob6323Go2Env
+from .rob6323_go2_rough_env_cfg import Rob6323Go2RoughEnvCfg
+
+class Rob6323Go2RoughEnv(Rob6323Go2Env):
+    cfg: Rob6323Go2RoughEnvCfg
+
+    def __init__(self, cfg: Rob6323Go2RoughEnvCfg, render_mode: str | None = None, **kwargs):
+        super().__init__(cfg, render_mode, **kwargs)
+
+    def _setup_scene(self):
+        super()._setup_scene()
+        self._height_scanner = RayCaster(self.cfg.height_scanner)
+        self.scene.sensors["height_scanner"] = self._height_scanner
+
+    def _get_observations(self) -> dict:
+        self._previous_actions = self._actions.clone()
+        
+        height_data = (
+            self._height_scanner.data.pos_w[:, :, 2].unsqueeze(2)
+            - self._height_scanner.data.ray_hits_w[..., 2].unsqueeze(2)
+        ).squeeze(2)
+        height_data = height_data.clip(-1.0, 1.0)
+        
+        obs = torch.cat([
+            self.robot.data.root_lin_vel_b,
+            self.robot.data.root_ang_vel_b,
+            self.robot.data.projected_gravity_b,
+            self._commands,
+            self.robot.data.joint_pos - self.robot.data.default_joint_pos,
+            self.robot.data.joint_vel,
+            self._actions,
+            self.clock_inputs,
+            height_data,
+        ], dim=-1)
+        
+        observations = {"policy": obs}
+        return observations
+```
+
+### Register Environment
+
+Update `__init__.py`:
+
+```python
+gym.register(
+    id="Template-Rob6323-Go2-Direct-Rough-v0",
+    entry_point=f"{__name__}.rob6323_go2_rough_env:Rob6323Go2RoughEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.rob6323_go2_rough_env_cfg:Rob6323Go2RoughEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:PPORunnerCfg",
+    },
+)
+```
+
+### Create new train_rough.sh and train_rough.slurm for executing rough terrain
+
+Create `train_rough.sh`
+
+```shell
+#!/usr/bin/env bash
+ssh -o StrictHostKeyChecking=accept-new burst "cd ~/rob6323_go2_project && sbatch --job-name='rob6323_rough_${USER}' --mail-user='${USER}@nyu.edu' train_rough.slurm '$@'"
+```
+
+Create `train_rough.slurm`
+
+```shell
+#!/bin/bash
+
+#SBATCH --requeue
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=10
+#SBATCH --mem=20GB
+#SBATCH --time=02:00:00
+#SBATCH --gres=gpu:1
+#SBATCH --mail-type=END
+#SBATCH --account=rob_gy6323-2025fa
+#SBATCH --partition=g2-standard-12
+#SBATCH --output=../slurm_%j.out
+#SBATCH --error=../slurm_%j.err
+
+set -euo pipefail
+
+# -------------------------------
+# Project workspace bootstrap
+# -------------------------------
+PROJECT_NAME="rob6323_go2_project"
+REMOTE_HOST="greene-dtn"
+LOCAL_PROJECT="${HOME}/${PROJECT_NAME}"
+REMOTE_PROJECT="${HOME}/${PROJECT_NAME}"
+ISAACLAB_DIR="/scratch/$USER/IsaacLab"
+
+# Ensure local project exists and mirrors remote (first time creates it)
+mkdir -p "${LOCAL_PROJECT}"
+rsync -az --delete --mkpath -e "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o GlobalKnownHostsFile=/dev/null" \
+    "${REMOTE_HOST}:${REMOTE_PROJECT}/" \
+    "${LOCAL_PROJECT}/"
+
+mkdir -p "${ISAACLAB_DIR}"
+rsync -az --delete --mkpath -e "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o GlobalKnownHostsFile=/dev/null" \
+    "${REMOTE_HOST}:${ISAACLAB_DIR}/" \
+    "${ISAACLAB_DIR}/"
+
+# -------------------------------
+# Hardcode your cluster paths
+# -------------------------------
+SIF_IMAGE="/scratch/$USER/isaac-lab-base.sif"
+RUN_DIR="${LOCAL_PROJECT}"                       # run inside the mirrored project
+PERSISTENT_CACHE_DIR="/scratch/$USER/docker-isaac-sim"
+PERSISTENT_LOGS_DIR="/scratch/$USER/isaaclab/logs/${SLURM_JOB_ID}"
+
+# Isaac Sim container paths
+DOCKER_ISAACSIM_ROOT_PATH="/isaac-sim"
+DOCKER_USER_HOME="/root"
+
+# Node-local cache & execution
+NODE_TMP="${SLURM_TMPDIR:-${TMPDIR:-/tmp}}"
+CACHE_ROOT="${NODE_TMP}/docker-isaac-sim"
+mkdir -p \
+  "${CACHE_ROOT}/cache/kit" \
+  "${CACHE_ROOT}/cache/ov" \
+  "${CACHE_ROOT}/cache/pip" \
+  "${CACHE_ROOT}/cache/glcache" \
+  "${CACHE_ROOT}/cache/computecache" \
+  "${CACHE_ROOT}/logs" \
+  "${CACHE_ROOT}/data" \
+  "${CACHE_ROOT}/documents" \
+  "${CACHE_ROOT}/kit-data"
+
+mkdir -p "${PERSISTENT_LOGS_DIR}"
+touch "${PERSISTENT_LOGS_DIR}/.keep"
+
+# Prefer node-local tmp for apptainer/singularity scratch
+export APPTAINER_TMPDIR="${NODE_TMP}"
+export APPTAINER_CACHEDIR="${NODE_TMP}/apptainer-cache"
+
+# Forward all user args to eval.py
+export ISAAC_ARGS="$*"
+echo "$ISAAC_ARGS"
+
+# Execute with GPU and required binds
+singularity exec \
+  --nv --containall \
+  -B "${CACHE_ROOT}/kit-data:${DOCKER_ISAACSIM_ROOT_PATH}/kit/data:rw" \
+  -B "${CACHE_ROOT}/cache/kit:${DOCKER_ISAACSIM_ROOT_PATH}/kit/cache:rw" \
+  -B "${CACHE_ROOT}/cache/ov:${DOCKER_USER_HOME}/.cache/ov:rw" \
+  -B "${CACHE_ROOT}/cache/pip:${DOCKER_USER_HOME}/.cache/pip:rw" \
+  -B "${CACHE_ROOT}/cache/glcache:${DOCKER_USER_HOME}/.cache/nvidia/GLCache:rw" \
+  -B "${CACHE_ROOT}/cache/computecache:${DOCKER_USER_HOME}/.nv/ComputeCache:rw" \
+  -B "${CACHE_ROOT}/logs:${DOCKER_USER_HOME}/.nvidia-omniverse/logs:rw" \
+  -B "${CACHE_ROOT}/data:${DOCKER_USER_HOME}/.local/share/ov/data:rw" \
+  -B "${CACHE_ROOT}/documents:${DOCKER_USER_HOME}/Documents:rw" \
+  -B "${ISAACLAB_DIR}:/workspace/isaaclab:rw" \
+  -B "${PERSISTENT_LOGS_DIR}:/workspace/isaaclab/logs:rw" \
+  -B "${RUN_DIR}:/workspace/run:rw" \
+  "${SIF_IMAGE}" bash -lc '
+set -euo pipefail
+
+cd /workspace/isaaclab
+export ISAACLAB_PATH=/workspace/isaaclab
+
+# Ensure the local package is installed in the container Python
+
+/isaac-sim/python.sh -m pip install -e /workspace/run/source/rob6323_go2
+
+/isaac-sim/python.sh /workspace/run/scripts/rsl_rl/train.py \
+  --task=Template-Rob6323-Go2-Direct-Rough-v0 \
+  --headless
+
+# Identify the latest-created/modified subdirectory under go2_rough_direct
+LATEST_DIR=$(ls -td /workspace/isaaclab/logs/rsl_rl/go2_rough_direct/*/ 2>/dev/null | head -n 1 || true)
+if [[ -z "${LATEST_DIR:-}" ]]; then
+  echo "No subdirectories found under /workspace/isaaclab/logs/rsl_rl/go2_rough_direct" >&2
+  exit 1
+fi
+LATEST_DIR="${LATEST_DIR%/}"
+
+# Run evaluation with the discovered checkpoint
+/isaac-sim/python.sh /workspace/run/scripts/rsl_rl/play.py \
+  --task=Template-Rob6323-Go2-Direct-Rough-v0 \
+  --checkpoint "${LATEST_DIR}/model_499.pt" \
+  --video \
+  --video_length 1000 \
+  --headless
+'
+
+rsync -az --delete \
+  --exclude='*.err' \
+  --exclude='*.out' \
+  -e "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o GlobalKnownHostsFile=/dev/null" \
+  "${PERSISTENT_LOGS_DIR}/" \
+  "${REMOTE_HOST}:${REMOTE_PROJECT}/logs/${SLURM_JOB_ID}/"
+```
+
+## Training Instructions
+
+### Train Flat Terrain with Friction Model
+
+```bash
+cd $HOME/rob6323_go2_project
+./train.sh
+```
+
+### Train Rough Terrain
+
+```bash
+cd $HOME/rob6323_go2_project
+./train_rough.sh 
+```
+
+Note: Reduce number of environments to 2048 for rough terrain to avoid PhysX buffer overflow.
+
+### Evaluation
+
+After training completes, logs will be in `logs/[job_id]/rsl_rl/go2_flat_direct/[timestamp]/`. Download and view with TensorBoard:
+
+```bash
+rsync -avzP <netid>@dtn.hpc.nyu.edu:/home/<netid>/rob6323_go2_project/logs ./
+tensorboard --logdir ./logs
+```
+
+Videos are generated automatically in `videos/play/` subdirectory of each run.
+
+## Summary of Modifications
+
+### Reward Function Enhancements
+- Added orientation penalty to keep base level
+- Added vertical velocity penalty to reduce bouncing
+- Added joint velocity penalty for smoother motion
+- Added angular velocity penalty to reduce roll and pitch
+- Implemented foot clearance rewards for proper swing phase
+- Implemented contact force tracking for stance phase control
+
+### Robustness Improvements
+- Implemented actuator friction model with randomization
+- Added stiction and viscous friction components
+- Randomized friction parameters per episode reset
+
+### Terrain Adaptation
+- Created rough terrain environment with height scanning
+- Added 160-point height map to observations
+- Scaled terrain difficulty for Go2 dimensions
+- Integrated RayCaster sensor for terrain perception
+
+### Key Parameters
+- PD gains: Kp=20.0, Kd=0.5
+- Torque limits: 100.0 Nm
+- Friction stiction range: 0.0 to 2.5
+- Friction viscous range: 0.0 to 0.3
+- Height scan: 1.6m x 1.0m grid at 0.1m resolution
+- Observation space: 52 (flat) or 212 (rough terrain)
+
+---
+
+## Resources
+
+- [Isaac Lab documentation](https://isaac-sim.github.io/IsaacLab/main/source/setup/ecosystem.html) — Everything you need to know about IsaacLab, and more!
+- [Isaac Lab ANYmal C environment](https://github.com/isaac-sim/IsaacLab/tree/main/source/isaaclab_tasks/isaaclab_tasks/direct/anymal_c) — This targets ANYmal C (not Unitree Go2), so use it as a reference and adapt robot config, assets, and reward to Go2.
+- [DMO (IsaacGym) Go2 walking project page](https://machines-in-motion.github.io/DMO/) • [Go2 walking environment used by the authors](https://github.com/Jogima-cyber/IsaacGymEnvs/blob/e351da69e05e0433e746cef0537b50924fd9fdbf/isaacgymenvs/tasks/go2_terrain.py) • [Config file used by the authors](https://github.com/Jogima-cyber/IsaacGymEnvs/blob/e351da69e05e0433e746cef0537b50924fd9fdbf/isaacgymenvs/cfg/task/Go2Terrain.yaml) — Look at the function `compute_reward_CaT` (beware that some reward terms have a weight of 0 and thus are deactivated, check weights in the config file); this implementation includes strong reward shaping, domain randomization, and training disturbances for robust sim‑to‑real, but it is written for legacy IsaacGym and the challenge is to re-implement it in Isaac Lab.
+- **API References**:
+    - [ArticulationData (`robot.data`)](https://isaac-sim.github.io/IsaacLab/main/source/api/lab/isaaclab.assets.html#isaaclab.assets.ArticulationData) — Contains `root_pos_w`, `joint_pos`, `projected_gravity_b`, etc.
+    - [ContactSensorData (`_contact_sensor.data`)](https://isaac-sim.github.io/IsaacLab/main/source/api/lab/isaaclab.sensors.html#isaaclab.sensors.ContactSensorData) — Contains `net_forces_w` (contact forces).
+
