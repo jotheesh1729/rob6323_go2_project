@@ -429,46 +429,17 @@ def __post_init__(self):
 
 ### Create Rough Terrain Environment
 
-Create `rob6323_go2_rough_env.py` extending the flat environment:
+Create `rob6323_go2_rough_env.py` in this case it is a mirror copy of the flat environment (we don't add sensors for our implementation) 
 
 ```python
-from .rob6323_go2_env import Rob6323Go2Env
-from .rob6323_go2_rough_env_cfg import Rob6323Go2RoughEnvCfg
 
-class Rob6323Go2RoughEnv(Rob6323Go2Env):
+class Rob6323Go2RoughEnv(DirectRLEnv):
     cfg: Rob6323Go2RoughEnvCfg
 
     def __init__(self, cfg: Rob6323Go2RoughEnvCfg, render_mode: str | None = None, **kwargs):
         super().__init__(cfg, render_mode, **kwargs)
+        ...
 
-    def _setup_scene(self):
-        super()._setup_scene()
-        self._height_scanner = RayCaster(self.cfg.height_scanner)
-        self.scene.sensors["height_scanner"] = self._height_scanner
-
-    def _get_observations(self) -> dict:
-        self._previous_actions = self._actions.clone()
-        
-        height_data = (
-            self._height_scanner.data.pos_w[:, :, 2].unsqueeze(2)
-            - self._height_scanner.data.ray_hits_w[..., 2].unsqueeze(2)
-        ).squeeze(2)
-        height_data = height_data.clip(-1.0, 1.0)
-        
-        obs = torch.cat([
-            self.robot.data.root_lin_vel_b,
-            self.robot.data.root_ang_vel_b,
-            self.robot.data.projected_gravity_b,
-            self._commands,
-            self.robot.data.joint_pos - self.robot.data.default_joint_pos,
-            self.robot.data.joint_vel,
-            self._actions,
-            self.clock_inputs,
-            height_data,
-        ], dim=-1)
-        
-        observations = {"policy": obs}
-        return observations
 ```
 
 ### Update PPO config
