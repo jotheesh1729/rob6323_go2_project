@@ -168,6 +168,9 @@ Students should only edit README.md below this ligne.
 
 ---
 
+# Baseline Improvements
+We apply the suggested changes from the tutorial as-is for parts 1 to 4. We document our implementations of parts 5 to 6 below, as well as additional featuers such as the actuator friction model and rough terrain environment training. 
+
 ## Part 5: Refining the Reward Function
 
 To achieve stable and natural-looking locomotion, we added penalties for unwanted behaviors that the basic velocity tracking rewards don't address.
