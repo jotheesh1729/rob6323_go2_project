@@ -547,7 +547,6 @@ Videos are generated automatically in `videos/play/` subdirectory of each run.
 - Created rough terrain environment with height scanning
 - Added 160-point height map to observations
 - Scaled terrain difficulty for Go2 dimensions
-- Integrated RayCaster sensor for terrain perception
 
 ### Key Parameters
 - PD gains: Kp=20.0, Kd=0.5
