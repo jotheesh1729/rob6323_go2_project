@@ -228,86 +228,62 @@ self._episode_sums = {
     ]
 }
 ```
+# Part 6: Advanced Foot Interaction
 
-## Part 6: Advanced Foot Interaction
+### 6.1 Find Sensor Indices
 
-### 6.1 Update Configuration
-
-Add reward scales in `rob6323_go2_env_cfg.py`:
-
-```python
-feet_clearance_reward_scale = -30.0
-tracking_contacts_shaped_force_reward_scale = 4.0
-```
-
-### 6.2 Find Sensor Indices
-
-In `__init__`, add separate indices for contact sensor:
+In `__init__`, add separate indices for robot bodies and contact sensor:
 
 ```python
-# Find indices in the CONTACT SENSOR (for forces)
+self._feet_ids = []
 self._feet_ids_sensor = []
+foot_names = ["FL_foot", "FR_foot", "RL_foot", "RR_foot"]
+
 for name in foot_names:
-    id_list, _ = self._contact_sensor.find_bodies(name)
-    self._feet_ids_sensor.append(id_list[0])
+    id_list, _ = self.robot.find_bodies(name)
+    self._feet_ids.append(id_list[0])
+    sensor_id_list, _ = self._contact_sensor.find_bodies(name)
+    self._feet_ids_sensor.append(sensor_id_list[0])
 ```
 
-### 6.3 Implement Foot Clearance Reward
+### 6.2 Implement Foot Clearance Reward
 
-Add this method to `rob6323_go2_env.py`:
+Add this code in `_get_rewards()`:
 
 ```python
-def _reward_feet_clearance(self):
-    phases = 1 - torch.abs(1.0 - torch.clip((self.foot_indices * 2.0) - 1.0, 0.0, 1.0) * 2.0)
-    foot_height = self.foot_positions_w[:, :, 2]
-    target_height = 0.08 * phases + 0.02
-    swing_mask = 1 - self.desired_contact_states
-    rew_foot_clearance = torch.square(target_height - foot_height) * swing_mask
-    reward = torch.sum(rew_foot_clearance, dim=1)
-    return reward
+# Foot clearance reward
+phases = 1 - torch.abs(1.0 - torch.clip((self.foot_indices * 2.0) - 1.0, 0.0, 1.0) * 2.0)
+foot_height = self.foot_positions_w[:, :, 2]
+target_height = 0.08 * phases + 0.02
+rew_foot_clearance = torch.square(target_height - foot_height) * (1 - self.desired_contact_states)
+rew_feet_clearance = torch.sum(rew_foot_clearance, dim=1)
 ```
 
-### 6.4 Implement Contact Force Tracking Reward
+### 6.3 Implement Contact Force Tracking Reward
 
-Add this method to `rob6323_go2_env.py`:
+Add this code in `_get_rewards()`:
 
 ```python
-def _reward_tracking_contacts_shaped_force(self):
-    contact_forces_3d = self._contact_sensor.data.net_forces_w[:, self._feet_ids_sensor, :]
-    foot_forces = torch.norm(contact_forces_3d, dim=-1)
-    desired_contact = self.desired_contact_states
-    swing_mask = 1 - desired_contact
-    force_penalty = 1 - torch.exp(-1 * foot_forces ** 2 / 100.)
-    rew_tracking_contacts = -swing_mask * force_penalty
-    reward = torch.sum(rew_tracking_contacts, dim=1) / 4.0
-    return reward
+# Contact force tracking reward
+foot_forces = torch.norm(self._contact_sensor.data.net_forces_w[:, self._feet_ids_sensor, :], dim=-1)
+desired_contact = self.desired_contact_states
+rew_tracking_contacts_shaped_force = torch.zeros(self.num_envs, device=self.device)
+
+for i in range(4):
+    rew_tracking_contacts_shaped_force += -(1 - desired_contact[:, i]) * (1 - torch.exp(-1 * foot_forces[:, i] ** 2 / 100.))
+
+rew_tracking_contacts_shaped_force /= 4
 ```
 
-### 6.5 Integrate into Rewards
+### 6.4 Integrate into Rewards
 
 Update `_get_rewards()`:
 
 ```python
-rew_feet_clearance = self._reward_feet_clearance()
-rew_tracking_contacts = self._reward_tracking_contacts_shaped_force()
-
 rewards = {
     ...
     "feet_clearance": rew_feet_clearance * self.cfg.feet_clearance_reward_scale,
-    "tracking_contacts_shaped_force": rew_tracking_contacts * self.cfg.tracking_contacts_shaped_force_reward_scale,
-}
-```
-
-Update logging in `__init__`:
-
-```python
-self._episode_sums = {
-    key: torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
-    for key in [
-        ...
-        "feet_clearance",
-        "tracking_contacts_shaped_force",
-    ]
+    "tracking_contacts_shaped_force": rew_tracking_contacts_shaped_force * self.cfg.tracking_contacts_shaped_force_reward_scale,
 }
 ```
 
@@ -318,10 +294,11 @@ self._episode_sums = {
 Add friction parameters to `rob6323_go2_env_cfg.py`:
 
 ```python
-# Friction model parameters
-use_friction_model = True
-friction_stiction_range = (0.0, 2.5)
-friction_viscous_range = (0.0, 0.3)
+# Friction ranges for actuator
+actuator_mu_range_min = 0.001
+actuator_mu_range_max = 0.3
+actuator_st_range_min = 0.001
+actuator_st_range_max = 2.5
 ```
 
 ### Initialize Friction Parameters
@@ -329,9 +306,9 @@ friction_viscous_range = (0.0, 0.3)
 In `__init__` of `rob6323_go2_env.py`:
 
 ```python
-if self.cfg.use_friction_model:
-    self.friction_stiction = torch.zeros(self.num_envs, 12, device=self.device)
-    self.friction_viscous = torch.zeros(self.num_envs, 12, device=self.device)
+# Actuator friction coefficients
+self.stiction_coeff = torch.zeros(self.num_envs, 12, device=self.device)
+self.viscous_coeff = torch.zeros(self.num_envs, 12, device=self.device)
 ```
 
 ### Add Randomization in Reset
@@ -339,13 +316,15 @@ if self.cfg.use_friction_model:
 In `_reset_idx()`:
 
 ```python
-if self.cfg.use_friction_model:
-    self.friction_stiction[env_ids] = torch.rand(len(env_ids), 12, device=self.device) * \
-        (self.cfg.friction_stiction_range[1] - self.cfg.friction_stiction_range[0]) + \
-        self.cfg.friction_stiction_range[0]
-    self.friction_viscous[env_ids] = torch.rand(len(env_ids), 12, device=self.device) * \
-        (self.cfg.friction_viscous_range[1] - self.cfg.friction_viscous_range[0]) + \
-        self.cfg.friction_viscous_range[0]
+# Sample new friction coefficients
+self.stiction_coeff[env_ids] = torch.zeros_like(self.stiction_coeff[env_ids]).uniform_(
+    self.cfg.actuator_st_range_min, 
+    self.cfg.actuator_st_range_max
+)
+self.viscous_coeff[env_ids] = torch.zeros_like(self.viscous_coeff[env_ids]).uniform_(
+    self.cfg.actuator_mu_range_min, 
+    self.cfg.actuator_mu_range_max
+)
 ```
 
 ### Apply Friction Model
@@ -354,23 +333,58 @@ Update `_apply_action()`:
 
 ```python
 def _apply_action(self) -> None:
-    torques = torch.clip(
+    # Compute friction torques
+    stiction = self.stiction_coeff * torch.tanh(self.robot.data.joint_vel / 0.1)
+    viscous = self.viscous_coeff * self.robot.data.joint_vel
+    actuator_friction_torque = stiction + viscous
+    
+    # Compute PD torques with friction
+    self.torques = torch.clip(
         (
             self.Kp * (self.desired_joint_pos - self.robot.data.joint_pos)
             - self.Kd * self.robot.data.joint_vel
+            - actuator_friction_torque
         ),
         -self.torque_limits,
         self.torque_limits,
     )
     
-    if self.cfg.use_friction_model:
-        tau_stiction = self.friction_stiction * torch.tanh(self.robot.data.joint_vel / 0.1)
-        tau_viscous = self.friction_viscous * self.robot.data.joint_vel
-        tau_friction = tau_stiction + tau_viscous
-        torques = torques - tau_friction
-    
-    self.robot.set_joint_effort_target(torques)
+    self.robot.set_joint_effort_target(self.torques)
 ```
+
+## Domain Randomization
+
+### Ground Friction Randomization
+
+Added physics material randomization using Isaac Lab's MDP events system in `rob6323_go2_env_cfg.py`:
+
+```python
+from isaaclab.managers import EventTermCfg as EventTerm
+from isaaclab.managers import SceneEntityCfg
+
+@configclass
+class EventCfg:
+    robot_physics_material = EventTerm(
+        func=mdp.randomize_rigid_body_material,
+        mode="reset",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", body_names=".*"),
+            "static_friction_range": (0.7, 1.0), 
+            "dynamic_friction_range": (0.6, 1.0),
+            "restitution_range": (1.0, 1.0),
+            "num_buckets": 250,
+            "make_consistent": True
+        },
+    )
+
+@configclass
+class Rob6323Go2EnvCfg(DirectRLEnvCfg):
+    ...
+    events: EventCfg = EventCfg()
+```
+
+This randomizes the friction properties of all robot body parts on each episode reset, making the policy more robust to varying ground conditions.
+
 
 ## Bonus Task 2: Rough Terrain Locomotion
 
