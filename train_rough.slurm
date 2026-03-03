@@ -98,20 +98,20 @@ export ISAACLAB_PATH=/workspace/isaaclab
 /isaac-sim/python.sh -m pip install -e /workspace/run/source/rob6323_go2
 
 /isaac-sim/python.sh /workspace/run/scripts/rsl_rl/train.py \
-  --task=Template-Rob6323-Go2-Direct-v0 \
+  --task=Template-Rob6323-Go2-Direct-Rough-v0 \
   --headless
 
-# Identify the latest-created/modified subdirectory under go2_flat_direct
-LATEST_DIR=$(ls -td /workspace/isaaclab/logs/rsl_rl/go2_flat_direct/*/ 2>/dev/null | head -n 1 || true)
+# Identify the latest-created/modified subdirectory under go2_rough_direct
+LATEST_DIR=$(ls -td /workspace/isaaclab/logs/rsl_rl/go2_rough_direct/*/ 2>/dev/null | head -n 1 || true)
 if [[ -z "${LATEST_DIR:-}" ]]; then
-  echo "No subdirectories found under /workspace/isaaclab/logs/rsl_rl/go2_flat_direct" >&2
+  echo "No subdirectories found under /workspace/isaaclab/logs/rsl_rl/go2_rough_direct" >&2
   exit 1
 fi
 LATEST_DIR="${LATEST_DIR%/}"
 
 # Run evaluation with the discovered checkpoint
 /isaac-sim/python.sh /workspace/run/scripts/rsl_rl/play.py \
-  --task=Template-Rob6323-Go2-Direct-v0 \
+  --task=Template-Rob6323-Go2-Direct-Rough-v0 \
   --checkpoint "${LATEST_DIR}/model_499.pt" \
   --video \
   --video_length 1000 \
@@ -123,4 +123,4 @@ rsync -az --delete \
   --exclude='*.out' \
   -e "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o GlobalKnownHostsFile=/dev/null" \
   "${PERSISTENT_LOGS_DIR}/" \
-  "${REMOTE_HOST}:${REMOTE_PROJECT}/logs/frictionREnvRFdHigh${SLURM_JOB_ID}/"
+  "${REMOTE_HOST}:${REMOTE_PROJECT}/logs/${SLURM_JOB_ID}/"

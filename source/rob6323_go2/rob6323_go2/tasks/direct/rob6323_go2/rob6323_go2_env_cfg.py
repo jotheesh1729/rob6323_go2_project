@@ -8,6 +8,7 @@ from isaaclab_assets.robots.unitree import UNITREE_GO2_CFG
 import isaaclab.envs.mdp as mdp
 import isaaclab.sim as sim_utils
 from isaaclab.assets import ArticulationCfg
+from isaaclab.actuators import ImplicitActuatorCfg
 from isaaclab.envs import DirectRLEnvCfg
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sim import SimulationCfg
@@ -38,6 +39,25 @@ class EventCfg:
         },
     )
 
+from isaaclab.managers import EventTermCfg as EventTerm #adding for friction randomization
+from isaaclab.managers import SceneEntityCfg #for finding all bodies with name robot
+
+# took from documentation https://isaac-sim.github.io/IsaacLab/main/source/tutorials/03_envs/create_direct_rl_env.html
+@configclass
+class EventCfg:
+  robot_physics_material = EventTerm(
+      func=mdp.randomize_rigid_body_material,
+      mode="reset",
+      params={
+          "asset_cfg": SceneEntityCfg("robot", body_names=".*"), #getting all robot bodies
+          "static_friction_range": (0.7, 1.0), 
+          "dynamic_friction_range": (0.6, 1.0),
+          "restitution_range": (1.0, 1.0),
+          "num_buckets": 250,
+          "make_consistent": True #checked all params to add https://isaac-sim.github.io/IsaacLab/main/_modules/isaaclab/envs/mdp/events.html#randomize_rigid_body_material
+      },
+  )
+
 @configclass
 class Rob6323Go2EnvCfg(DirectRLEnvCfg):
     # env
@@ -46,39 +66,25 @@ class Rob6323Go2EnvCfg(DirectRLEnvCfg):
     # - spaces definition
     action_scale = 0.25
     action_space = 12
-    observation_space = 48
+    # add 4 for clock phase input for feet placement -- part-4
+    observation_space = 48 + 4
     state_space = 0
     debug_vis = True
-    
-    # PD control gains
+    # part -- 3 - terminate condition
+    base_height_min = 0.05 #correction to change to 5cm after suggestion
+    #Friction ranges for actuator
+    actuator_mu_range_min = 0.001 #viscous coeff
+    actuator_mu_range_max = 0.3
+    actuator_st_range_min = 0.001 #stiction coeff
+    actuator_st_range_max = 2.5
+
+    # PD control gains -- part 2
     Kp = 20.0  # Proportional gain
     Kd = 0.5   # Derivative gain
     torque_limits = 100.0  # Max torque
-    
-    
-    # Actuator friction model params
-    friction_fs_min = 0.0
-    friction_fs_max = 2.5
-    friction_mu_min = 0.0
-    friction_mu_max = 0.3
-    
-    # In Rob6323Go2EnvCfg
-    base_height_min = 0.05  #0.20,0.15,0.25
-    
-    # reward scales
-    lin_vel_reward_scale = 2.0 #2,4,6
-    yaw_rate_reward_scale = 1.0 #.1,3,1.5
-    action_rate_reward_scale = -0.1
-    
-    # Part 5 - Additional reward scales
-    orient_reward_scale = -5.0 #0
-    lin_vel_z_reward_scale = -0.02  #0
-    dof_vel_reward_scale = -0.0001
-    ang_vel_xy_reward_scale = -0.001
-    torque_reward_scale = -0.0001  # Reward scale for torque penalty
-    raibert_heuristic_reward_scale = -10.0
-    feet_clearance_reward_scale = -30.0
-    tracking_contacts_shaped_force_reward_scale = 4.0 #1,2,4
+
+    #randomization
+    events: EventCfg = EventCfg() #from documentation
 
     observation_space = 48 + 4  # Added 4 for clock inputs
     
@@ -113,7 +119,8 @@ class Rob6323Go2EnvCfg(DirectRLEnvCfg):
     # robot(s)
     # Update robot_cfg
     robot_cfg: ArticulationCfg = UNITREE_GO2_CFG.replace(prim_path="/World/envs/env_.*/Robot")
-    # "base_legs" is an arbitrary key we use to group these actuators
+
+    # "base_legs" is an arbitrary key we use to group these actuators -- part 2
     robot_cfg.actuators["base_legs"] = ImplicitActuatorCfg(
         joint_names_expr=[".*_hip_joint", ".*_thigh_joint", ".*_calf_joint"],
         effort_limit=23.5,
@@ -121,7 +128,7 @@ class Rob6323Go2EnvCfg(DirectRLEnvCfg):
         stiffness=0.0,  # CRITICAL: Set to 0 to disable implicit P-gain
         damping=0.0,    # CRITICAL: Set to 0 to disable implicit D-gain
     )
- 
+
     # scene
     scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=4096, env_spacing=4.0, replicate_physics=True)
     contact_sensor: ContactSensorCfg = ContactSensorCfg(
@@ -141,3 +148,20 @@ class Rob6323Go2EnvCfg(DirectRLEnvCfg):
     goal_vel_visualizer_cfg.markers["arrow"].scale = (0.5, 0.5, 0.5)
     current_vel_visualizer_cfg.markers["arrow"].scale = (0.5, 0.5, 0.5)
 
+    # reward scales
+    lin_vel_reward_scale = 0.8 #decreased the reward, as giving high variance gradient
+    yaw_rate_reward_scale = 0.5
+    #part-1 change
+    action_rate_reward_scale = -0.1
+    #part--4
+    raibert_heuristic_reward_scale = -10.0
+    #part --5 unnatural walking penalties
+    orient_reward_scale = -5.0
+    lin_vel_z_reward_scale = -0.02
+    dof_vel_reward_scale = -0.0003 #increased penalty for fast joint motion
+    ang_vel_xy_reward_scale = -0.001
+    #part --6 contact forces and foot clearance
+    feet_clearance_reward_scale = -40.0 # changed by 10 to check performance
+    tracking_contacts_shaped_force_reward_scale = 4.0
+    #torque magnitude penalty
+    torque_reward_scale = -0.0001
