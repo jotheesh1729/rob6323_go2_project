@@ -17,6 +17,27 @@ from isaaclab.terrains import TerrainImporterCfg
 from isaaclab.sensors import ContactSensorCfg
 from isaaclab.markers import VisualizationMarkersCfg
 from isaaclab.markers.config import BLUE_ARROW_X_MARKER_CFG, FRAME_MARKER_CFG, GREEN_ARROW_X_MARKER_CFG
+from isaaclab.actuators import ImplicitActuatorCfg
+
+
+from isaaclab.managers import EventTermCfg as EventTerm #adding for friction randomization
+from isaaclab.managers import SceneEntityCfg #for finding all bodies with name robot
+
+# took from documentation https://isaac-sim.github.io/IsaacLab/main/source/tutorials/03_envs/create_direct_rl_env.html
+@configclass
+class EventCfg:
+    robot_physics_material = EventTerm(
+        func=mdp.randomize_rigid_body_material,
+        mode="reset",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", body_names=".*"), #getting all robot bodies
+            "static_friction_range": (0.7, 1.0), 
+            "dynamic_friction_range": (0.6, 1.0),
+            "restitution_range": (0.0, 0.0),
+            "num_buckets": 250,
+            "make_consistent": True #checked all params to add https://isaac-sim.github.io/IsaacLab/main/_modules/isaaclab/envs/mdp/events.html#randomize_rigid_body_material
+        },
+    )
 
 from isaaclab.managers import EventTermCfg as EventTerm #adding for friction randomization
 from isaaclab.managers import SceneEntityCfg #for finding all bodies with name robot
@@ -65,6 +86,11 @@ class Rob6323Go2EnvCfg(DirectRLEnvCfg):
     #randomization
     events: EventCfg = EventCfg() #from documentation
 
+    observation_space = 48 + 4  # Added 4 for clock inputs
+    
+    #randomization
+    events: EventCfg = EventCfg() #from documentation
+    
     # simulation
     sim: SimulationCfg = SimulationCfg(
         dt=1 / 200,
@@ -91,6 +117,7 @@ class Rob6323Go2EnvCfg(DirectRLEnvCfg):
         debug_vis=False,
     )
     # robot(s)
+    # Update robot_cfg
     robot_cfg: ArticulationCfg = UNITREE_GO2_CFG.replace(prim_path="/World/envs/env_.*/Robot")
 
     # "base_legs" is an arbitrary key we use to group these actuators -- part 2
